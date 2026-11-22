@@ -1,6 +1,6 @@
 # Historia zmian
 
-## [Niewydane]
+## [0.4.0] – 2026-11-22
 
 ### Nowe
 - **Kara za błąd**: przy każdym złym ruchu przeciwnika (pułapki i trudne linie) widać linię
