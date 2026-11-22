@@ -248,6 +248,11 @@ function searchParams() {
     lichess_source: $("#p-lsource").value,
     use_local_db: $("#p-local").checked,
     speeds: $$(".p-speed").filter((c) => c.checked).map((c) => c.value),
+    novelty_max_loss: Math.round(+$("#p-nov-loss").value * 100),
+    novelty_max_games: +$("#p-nov-games").value,
+    theory_min_games: +$("#p-theory").value,
+    hard_error: +$("#p-hard-err").value / 100,
+    obvious_p: +$("#p-obvious").value / 100,
   };
 }
 
@@ -311,69 +316,194 @@ function gamesStr(local, lichess) {
 
 function showResult(res) {
   state.result = res;
-  const color = res.params.color;
-  const rootFen = res.params.fen;
-  const el = $("#tab-traps");
-  if (!res.traps.length) {
-    el.innerHTML = `<p class="muted">Brak pułapek spełniających kryteria. Spróbuj szerszego zakresu, większej liczby
-      pozycji albo łagodniejszego progu oceny.</p>`;
-  } else {
-    const range = `${res.params.elo_min}–${res.params.elo_max}`;
-    const oppName = color === "white" ? "czarnych" : "białych";
-    el.innerHTML = `<details class="help"><summary>Jak to czytać?</summary>
-      <p>Pułapka to pozycja (po Twoim ruchu), w której <b>przeciwnik często gra naturalny, ale zły ruch</b>.
-      „Naturalny” = tak zagrałby typowy gracz ${range} (Maia-2 + statystyki partii), „zły” = silnik pokazuje
-      wyraźny spadek jego szans (jak „mistake” na Lichess).</p>
-      <p>Każda karta mówi: jaką linię grasz, co przeciwnik najczęściej tu psuje i jakie odpowiedzi trzymają pozycję.
-      Wszystkie Twoje ruchy w linii mieszczą się w ustawionym progu oceny. Kliknij kartę, żeby zobaczyć pozycję
-      na szachownicy (czerwone strzałki = błędy przeciwnika, zielone = dobre odpowiedzi).</p>
-      <p><b>Dojście</b> – jak często przeciwnik z tego zakresu sam doprowadzi do tej pozycji swoimi typowymi ruchami.
-      <b>Siła pułapki</b> – średnio ile % szansy wygranej przeciwnik tu oddaje (wyżej = lepiej).
-      Oceny zawsze z perspektywy białych.</p></details>
-      <p class="muted small">Przeanalizowano ${res.analysed} pozycji, znaleziono ${res.traps.length} pułapek
-      (od najlepszych: częste dojście × duży i częsty błąd).</p>` +
-      res.traps.map((t, i) => {
-        const line = t.line.length ? lineText(rootFen, t.line) : "(od razu w tej pozycji)";
-        const mvNo = (san) => {
-          const f = t.fen.split(" ");
-          return f[5] + (f[1] === "w" ? "." : "…") + san;
-        };
-        const ev = (d) => fmtEval(myToWhite(d.cp, color));
-        const bad = t.bad.slice(0, 3).map((d) =>
-          `<li><b class="badmv">${mvNo(d.san)}</b> – zagra to ok. <b>${pctStr(d.p)}</b> graczy, ocena spada do <b>${ev(d)}</b></li>`).join("");
-        const good = t.good.slice(0, 3).map((d) => `${mvNo(d.san)} <small>(${pctStr(d.p)}, ${ev(d)})</small>`).join(", ");
-        return `<div class="trap" data-i="${i}">
-          <div class="trap-head">
-            <span class="num">#${i + 1}</span>
-            <span class="line">${line}</span>
-          </div>
-          <div class="trap-body">
-            <div class="muted small">Ruch ${oppName}. Naturalne, ale złe:</div>
-            <ul class="badlist">${bad}</ul>
-            <div class="small">${t.only_move ? '<span class="tag">jedyny dobry ruch</span> ' : '<span class="muted">Dobre odpowiedzi:</span> '}${good}</div>
-          </div>
-          <div class="trap-meta">
-            <span title="Szansa, że przeciwnik swoimi typowymi ruchami doprowadzi do tej pozycji">dojście <b>${pctStr(t.reach)}</b></span>
-            <span title="Ile % ludzi popełnia tu błąd">błąd <b>${pctStr(t.error_chance)}</b></span>
-            <span title="Średnio ile % szansy wygranej przeciwnik tu oddaje">siła <b>${(t.trick * 100).toFixed(1)}</b></span>
-            ${t.verified === true ? '<span class="tag ok" title="Twoje ruchy w linii sprawdzone na większej głębokości">✓ zweryfikowane</span>' : ""}
-            <span class="muted" title="Liczba partii z tą pozycją (wybrany zakres rankingu)">${gamesStr(t.local_games, t.lichess_games)}</span>
-          </div>
-        </div>`;
-      }).join("");
-    el.querySelectorAll(".trap").forEach((d) => {
-      d.onclick = () => {
-        el.querySelectorAll(".trap").forEach((x) => x.classList.remove("sel"));
-        d.classList.add("sel");
-        const t = res.traps[+d.dataset.i];
-        loadLine(res, t.line_uci, t);
-      };
-    });
-  }
+  const tabs = { traps: res.traps || [], hard: res.hard_lines || [], nov: res.novelties || [] };
+  $('.tab[data-tab="traps"]').textContent = `Pułapki (${tabs.traps.length})`;
+  $('.tab[data-tab="hard"]').textContent = `Trudne linie (${tabs.hard.length})`;
+  $('.tab[data-tab="nov"]').textContent = `Nowinki (${tabs.nov.length})`;
+  renderTraps(res);
+  renderHard(res);
+  renderNovelties(res);
   renderTree(res);
 }
 
-async function loadLine(res, ucis, trap) {
+// numer ruchu dla ruchu zagranego w pozycji `fen`
+function mvNo(fen, san) {
+  const f = fen.split(" ");
+  return f[5] + (f[1] === "w" ? "." : "…") + san;
+}
+
+function arrowsFor(good, bad) {
+  const out = [];
+  (bad || []).slice(0, 3).forEach((d) => out.push({ from: d.uci.slice(0, 2), to: d.uci.slice(2, 4), color: "#c0392b", opacity: Math.min(0.9, 0.35 + d.p) }));
+  (good || []).slice(0, 2).forEach((d) => out.push({ from: d.uci.slice(0, 2), to: d.uci.slice(2, 4), color: "#15781b", opacity: 0.8 }));
+  return out;
+}
+
+function bindCards(el, cls, onPick) {
+  el.querySelectorAll("." + cls).forEach((d) => {
+    d.onclick = (e) => {
+      if (e.target.closest("[data-sub]")) return;
+      el.querySelectorAll("." + cls).forEach((x) => x.classList.remove("sel"));
+      d.classList.add("sel");
+      onPick(+d.dataset.i, null);
+    };
+    d.querySelectorAll("[data-sub]").forEach((s) => (s.onclick = (e) => {
+      e.stopPropagation();
+      el.querySelectorAll("." + cls).forEach((x) => x.classList.remove("sel"));
+      d.classList.add("sel");
+      onPick(+d.dataset.i, +s.dataset.sub);
+    }));
+  });
+}
+
+function rangeStr(res) { return `${res.params.elo_min}–${res.params.elo_max}`; }
+
+function renderTraps(res) {
+  const color = res.params.color;
+  const rootFen = res.params.fen;
+  const el = $("#tab-traps");
+  const traps = res.traps || [];
+  const oppName = color === "white" ? "czarnych" : "białych";
+  const help = `<details class="help"><summary>Jak to czytać?</summary>
+    <p>Pułapka to pozycja (po Twoim ruchu), w której <b>przeciwnik często gra naturalny, ale zły ruch</b>.
+    „Naturalny” = tak zagrałby typowy gracz ${rangeStr(res)} (Maia-2 + statystyki partii), „zły” = silnik pokazuje
+    spadek jego szansy wygranej o co najmniej 10% (jak „mistake” na Lichess).</p>
+    <p><b>Dojście</b> – jak często przeciwnik sam doprowadzi do tej pozycji swoimi typowymi ruchami.
+    <b>Błąd</b> – ilu ludzi zagra tu zły ruch. <b>Siła</b> – średnio ile % szansy wygranej przeciwnik tu oddaje.
+    <span class="tag hid">ukryta</span> – nawet silnik na małej głębokości wybrałby zły ruch (refutacja jest głęboka).
+    <span class="tag">jedyny ruch</span> – tylko jeden ruch nie jest błędem. Oceny zawsze z perspektywy białych.</p></details>`;
+  if (!traps.length) {
+    el.innerHTML = help + `<p class="muted">Brak pułapek. Spróbuj większej liczby pozycji, innego zakresu rankingu
+      albo łagodniejszego progu oceny.</p>`;
+    return;
+  }
+  el.innerHTML = help + `<p class="muted small">Przeanalizowano ${res.analysed} pozycji. Od najlepszych: częste dojście × częsty i duży błąd.</p>` +
+    traps.map((t, i) => {
+      const line = t.line.length ? lineText(rootFen, t.line) : "(od razu w tej pozycji)";
+      const ev = (d) => fmtEval(myToWhite(d.cp, color));
+      const bad = t.bad.slice(0, 3).map((d) =>
+        `<li><b class="badmv">${mvNo(t.fen, d.san)}</b> – zagra to ok. <b>${pctStr(d.p)}</b> graczy, ocena spada do <b>${ev(d)}</b></li>`).join("");
+      const good = t.good.slice(0, 3).map((d) => `${mvNo(t.fen, d.san)} <small>(${pctStr(d.p)}, ${ev(d)})</small>`).join(", ");
+      return `<div class="trap" data-i="${i}">
+        <div class="trap-head"><span class="num">#${i + 1}</span><span class="line">${line}</span></div>
+        <div class="trap-body">
+          <div class="muted small">Ruch ${oppName}. Naturalne, ale złe:</div>
+          <ul class="badlist">${bad}</ul>
+          <div class="small">${t.only_move ? '<span class="tag">jedyny dobry ruch</span> ' : '<span class="muted">Dobre odpowiedzi:</span> '}${good}</div>
+        </div>
+        <div class="trap-meta">
+          <span title="Szansa, że przeciwnik swoimi typowymi ruchami doprowadzi do tej pozycji">dojście <b>${pctStr(t.reach)}</b></span>
+          <span title="Ile % ludzi popełnia tu błąd">błąd <b>${pctStr(t.error_chance)}</b></span>
+          <span title="Średnio ile % szansy wygranej przeciwnik tu oddaje">siła <b>${(t.trick * 100).toFixed(1)}</b></span>
+          ${t.hidden ? '<span class="tag hid" title="Silnik na małej głębokości też wybrałby zły ruch">ukryta</span>' : ""}
+          ${t.verified === true ? '<span class="tag ok" title="Twoje ruchy w linii sprawdzone na większej głębokości">✓ zweryfikowane</span>' : ""}
+          <span class="muted" title="Liczba partii z tą pozycją (wybrany zakres rankingu)">${gamesStr(t.local_games, t.lichess_games)}</span>
+        </div>
+      </div>`;
+    }).join("");
+  bindCards(el, "trap", (i) => {
+    const t = traps[i];
+    loadLine(res, t.line_uci, arrowsFor(t.good, t.bad));
+  });
+}
+
+function renderHard(res) {
+  const color = res.params.color;
+  const rootFen = res.params.fen;
+  const el = $("#tab-hard");
+  const lines = res.hard_lines || [];
+  const oppName = color === "white" ? "Czarne" : "Białe";
+  const help = `<details class="help"><summary>Jak to czytać?</summary>
+    <p>Trudna linia to wariant, w którym <b>przeciwnik musi kilka razy znaleźć trudny ruch</b>. Trudny moment to pozycja,
+    w której co najmniej ${Math.round((res.params.hard_error ?? 0.25) * 100)}% graczy ${rangeStr(res)} się myli, a dobry ruch
+    <b>nie jest oczywisty</b> – nie jest odbiciem bierki, wymuszoną ucieczką z szacha ani ruchem, który typowy gracz
+    i tak by zagrał (Maia ≥ ${Math.round((res.params.obvious_p ?? 0.5) * 100)}%).</p>
+    <p>Linia pokazuje przebieg, w którym przeciwnik <b>za każdym razem broni się dobrze</b> – dla Ciebie to gotowy
+    repertuar na najlepszą obronę. <b>Przejdzie bez błędu</b> = szansa, że typowy gracz znajdzie wszystkie trudne ruchy.
+    <b>Dojście</b> = szansa, że w ogóle dojdzie do pierwszego trudnego momentu. Kliknij moment, żeby zobaczyć go na szachownicy.</p></details>`;
+  if (!lines.length) {
+    el.innerHTML = help + `<p class="muted">Brak trudnych linii. Pomaga większa liczba pozycji, większa głębokość
+      wariantu albo obniżenie progu „trudny moment” w ustawieniach zaawansowanych.</p>`;
+    return;
+  }
+  el.innerHTML = help + lines.map((h, i) => {
+    const ev = (d) => fmtEval(myToWhite(d.cp, color));
+    const moments = h.moments.map((m, j) => {
+      const good = m.good.map((g) => `<b class="goodmv">${mvNo(m.fen, g.san)}!</b> <small>(znajduje ${pctStr(g.p)})</small>`).join(" lub ");
+      const bad = m.bad.slice(0, 2).map((b) => `${mvNo(m.fen, b.san)} <small>${pctStr(b.p)} → ${ev(b)}</small>`).join(", ");
+      const kind = m.type === "only" ? '<span class="tag">jedyny ruch</span>' : '<span class="tag soft">trudny wybór</span>';
+      return `<li data-sub="${j}" class="moment" title="Pokaż tę pozycję">
+        ${kind} ${m.hidden ? '<span class="tag hid">ukryta</span>' : ""}
+        ${good} – myli się <b>${pctStr(m.error)}</b>${bad ? `, np. ${bad}` : ""}</li>`;
+    }).join("");
+    return `<div class="hline" data-i="${i}">
+      <div class="trap-head"><span class="num">#${i + 1}</span><span class="line">${lineText(rootFen, h.line)}</span></div>
+      <div class="muted small">${oppName} muszą znaleźć ${h.moments.length} ${h.moments.length === 1 ? "trudny ruch" : "trudne ruchy"}:</div>
+      <ol class="moments">${moments}</ol>
+      <div class="trap-meta">
+        <span title="Szansa, że typowy gracz znajdzie wszystkie trudne ruchy">przejdzie bez błędu <b>${pctStr(h.survive)}</b></span>
+        <span title="Szansa, że przeciwnik dojdzie do pierwszego trudnego momentu">dojście <b>${pctStr(h.entry_reach)}</b></span>
+        ${h.verified === true ? '<span class="tag ok">✓ zweryfikowane</span>' : ""}
+        <span class="muted">${gamesStr(h.local_games, h.lichess_games)}</span>
+      </div>
+    </div>`;
+  }).join("");
+  bindCards(el, "hline", (i, sub) => {
+    const h = lines[i];
+    const m = h.moments[sub === null ? 0 : sub];
+    loadLine(res, m.line_uci, arrowsFor(m.good, m.bad));
+  });
+}
+
+function renderNovelties(res) {
+  const color = res.params.color;
+  const rootFen = res.params.fen;
+  const el = $("#tab-nov");
+  const novs = res.novelties || [];
+  const help = `<details class="help"><summary>Jak to czytać?</summary>
+    <p>Nowinka to <b>Twój ruch rzadko grany w pozycji, która jest znaną teorią</b> (co najmniej
+    ${res.params.theory_min_games ?? 50} partii w wybranych bazach i zakresie ${rangeStr(res)}), grany najwyżej
+    ${res.params.novelty_max_games ?? 10} razy, a według silnika najwyżej ${((res.params.novelty_max_loss ?? 50) / 100).toFixed(1)} piona
+    gorszy od najlepszego ruchu i mieszczący się w Twoim progu oceny. <span class="tag tn">TN</span> = ani jednej partii.</p>
+    <p><b>Po nowince</b> – co przeciwnik zwykle odpowiada (Maia/statystyki) i najlepsza pułapka, jaką program znalazł dalej.
+    Wyżej są nowinki w mocno grywanej teorii, bliskie najlepszemu ruchowi i takie, po których przeciwnikowi łatwo o błąd.</p></details>`;
+  if (!novs.length) {
+    el.innerHTML = help + `<p class="muted">Brak nowinek. Nowinki szukane są tylko w pozycjach z co najmniej
+      ${res.params.theory_min_games ?? 50} partiami – zacznij szukanie wcześniej w debiucie, zwiększ liczbę partii „rzadko”
+      albo dopuszczalną stratę.</p>`;
+    return;
+  }
+  el.innerHTML = help + novs.map((n, i) => {
+    const before = n.line.slice(0, -1);
+    const pre = before.length ? lineText(rootFen, before) : "W pozycji startowej";
+    const ev = (cp) => fmtEval(myToWhite(cp, color));
+    const replies = (n.replies || []).map((d) => `${mvNo(n.fen, d.san)} <small>${pctStr(d.p)}${d.loss >= 0.1 ? " – błąd → " + ev(d.cp) : ""}</small>`).join(", ");
+    const follow = n.follow_trap
+      ? `<div class="small" data-sub="1" title="Pokaż pułapkę"><span class="muted">Dalej pułapka:</span> ${lineText(rootFen, n.follow_trap.line)}
+         <small>(błąd ${pctStr(n.follow_trap.error)})</small></div>` : "";
+    const games = n.games === 0 ? '<span class="tag tn">TN</span> nigdy nie grane' : `grane <b>${n.games}</b>×`;
+    return `<div class="nov" data-i="${i}">
+      <div class="trap-head"><span class="num">#${i + 1}</span><span class="line">${pre}</span></div>
+      <div class="nov-move"><b class="novmv">${mvNo(n.parent_fen, n.san)}!?</b> N
+        <span class="muted small">– ${games} na ${(n.parent_games || 0).toLocaleString("pl")} partii w tej pozycji</span></div>
+      <div class="small">Ocena <b>${ev(n.eval)}</b> · najlepszy ruch silnika ${n.best_san ? mvNo(n.parent_fen, n.best_san) : "?"} ${ev(n.best_cp)}
+        <span class="muted">(różnica ${(n.loss / 100).toFixed(2)})</span></div>
+      ${replies ? `<div class="small"><span class="muted">Po nowince:</span> ${replies}</div>` : ""}
+      ${follow}
+      <div class="trap-meta">
+        ${n.verified === true ? '<span class="tag ok">✓ zweryfikowane</span>' : '<span class="muted">niezweryfikowane</span>'}
+        ${n.error >= 0.08 ? `<span>od razu błąd u <b>${pctStr(n.error)}</b> ludzi</span>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+  bindCards(el, "nov", (i, sub) => {
+    const n = novs[i];
+    if (sub === 1 && n.follow_trap) loadLine(res, n.follow_trap.line_uci, []);
+    else loadLine(res, n.line_uci, [{ from: n.line_uci.at(-1).slice(0, 2), to: n.line_uci.at(-1).slice(2, 4), color: "#2f7bd9", opacity: 0.8 }]);
+  });
+}
+
+async function loadLine(res, ucis, arrows) {
   const hist = JSON.parse(localStorage.getItem("hist-" + res.id) || "null");
   const startFen = hist ? hist.startFen : res.params.fen;
   const all = (hist ? hist.moves : []).concat(ucis);
@@ -381,11 +511,7 @@ async function loadLine(res, ucis, trap) {
   state.startFen = startFen;
   state.moves = r.moves;
   state.cursor = r.moves.length;
-  state.arrows = [];
-  if (trap) {
-    trap.bad.slice(0, 3).forEach((d) => state.arrows.push({ from: d.uci.slice(0, 2), to: d.uci.slice(2, 4), color: "#c0392b", opacity: 0.35 + d.p }));
-    trap.good.slice(0, 2).forEach((d) => state.arrows.push({ from: d.uci.slice(0, 2), to: d.uci.slice(2, 4), color: "#15781b", opacity: 0.8 }));
-  }
+  state.arrows = arrows || [];
   refresh();
 }
 
@@ -404,7 +530,10 @@ function renderTree(res) {
       const label = `${moveNumberPrefix(rootFen, idx) || (whiteMove ? "" : "")}${c.san}`;
       const meta = [`<span class="ev">${c.eval !== null ? fmtEval(myToWhite(c.eval, color)) : ""}</span>`];
       if (!mine) meta.push(`<span class="muted">${pctStr(c.prob)}</span>`);
-      if (c.trick >= 0.03) meta.push(`<span class="tag" title="oczekiwana strata przeciwnika w tej pozycji">pułapka ${(c.trick * 100).toFixed(0)}</span>`);
+      if (c.novelty) meta.push(`<span class="tag tn" title="Nowinka: grane ${c.novelty.games}× na ${c.novelty.parent_games} partii">${c.novelty.tn ? "TN" : "N"}</span>`);
+      if (c.moment) meta.push(`<span class="tag" title="Trudny moment: myli się ${pctStr(c.moment.error)}">${c.moment.type === "only" ? "jedyny ruch" : "trudne"}</span>`);
+      else if (c.trick >= 0.03) meta.push(`<span class="tag" title="oczekiwana strata przeciwnika w tej pozycji">pułapka ${(c.trick * 100).toFixed(0)}</span>`);
+      if (c.hidden) meta.push('<span class="tag hid">ukryta</span>');
       if (c.verified === true) meta.push('<span class="tag ok">✓</span>');
       const g = gamesStr(c.local_games, c.lichess_games);
       if (g) meta.push(`<span class="muted small">${g}</span>`);
@@ -426,7 +555,7 @@ async function loadSaved(selectId) {
   const r = await api("/api/searches");
   const sel = $("#saved");
   sel.innerHTML = '<option value="">— zapisane wyszukiwania —</option>' + r.saved.map((s) =>
-    `<option value="${s.id}">${s.created || ""} · ${s.color === "white" ? "białe" : "czarne"} · ${s.elo} · ${s.traps} pułapek</option>`).join("");
+    `<option value="${s.id}">${s.created || ""} · ${s.color === "white" ? "białe" : "czarne"} · ${s.elo} · ${s.traps} pułapek · ${s.hard ?? 0} linii · ${s.novelties ?? 0} nowinek</option>`).join("");
   if (selectId) sel.value = selectId;
   if (r.running.length && !state.job) {
     state.job = r.running[0].id;
@@ -516,8 +645,7 @@ $("#btn-pgn").onclick = async () => {
 };
 $$(".tab").forEach((b) => (b.onclick = () => {
   $$(".tab").forEach((x) => x.classList.toggle("active", x === b));
-  $("#tab-traps").classList.toggle("hidden", b.dataset.tab !== "traps");
-  $("#tab-tree").classList.toggle("hidden", b.dataset.tab !== "tree");
+  for (const t of ["traps", "hard", "nov", "tree"]) $("#tab-" + t).classList.toggle("hidden", b.dataset.tab !== t);
 }));
 
 updateEvalLabel();

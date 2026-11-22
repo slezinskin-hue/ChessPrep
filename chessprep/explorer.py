@@ -9,6 +9,8 @@ import json
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 
 import chess
 import requests
@@ -19,6 +21,9 @@ from .dbindex import GameIndex
 LICHESS_BUCKETS = [0, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2500]
 DEFAULT_SPEEDS = ["blitz", "rapid", "classical"]
 CACHE_TTL = 30 * 24 * 3600  # statystyki zmieniają się powoli
+
+HARD_TIMEOUT = 15  # s - po tym czasie porzucamy zapytanie do Lichess
+_HTTP_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="lichess")
 
 _CASTLE_FIX = {"e1h1": "e1g1", "e1a1": "e1c1", "e8h8": "e8g8", "e8a8": "e8c8"}
 
@@ -77,8 +82,17 @@ class LichessExplorer:
                 wait = 0.25 - (time.time() - self._last)  # nie zasypujemy serwera
                 if wait > 0:
                     time.sleep(wait)
+                # Twardy limit czasu: zdarza się, że połączenie (np. przez skaner HTTPS
+                # antywirusa) zawiesza się mimo timeoutu requests - wtedy porzucamy wątek.
+                fut = _HTTP_POOL.submit(self.session.get, url, timeout=(5, 10),
+                                        headers={"Authorization": f"Bearer {self.token}"})
                 try:
-                    r = self.session.get(url, headers={"Authorization": f"Bearer {self.token}"}, timeout=20)
+                    r = fut.result(timeout=HARD_TIMEOUT)
+                except FutureTimeout:
+                    self.error = "Lichess nie odpowiada - pauza 60 s"
+                    self._blocked_until = time.time() + 60
+                    self.session = requests.Session()  # nowe połączenie przy następnej próbie
+                    return None
                 except requests.RequestException as exc:
                     self.error = f"Błąd sieci: {exc}"
                     return None

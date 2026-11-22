@@ -241,10 +241,26 @@ def _tree_to_pgn(result: dict) -> str:
                 continue
             g = gnode.add_variation(mv)
             parts = [f"ocena {fmt_cp(ch['eval'])}"]
+            nv = ch.get("novelty")
+            if nv:
+                g.nags.add(chess.pgn.NAG_NOVELTY)
+                g.nags.add(chess.pgn.NAG_SPECULATIVE_MOVE)
+                parts.append("NOWINKA: " + ("nigdy nie grane" if nv.get("tn") else f"grane {nv['games']}×")
+                             + f" na {nv.get('parent_games') or 0} partii")
+            # ruch przeciwnika, który był "trudnym momentem" w pozycji rodzica
+            pm = tnode.get("moment")
+            if pm and any(x["uci"] == ch["uci"] for x in pm["good"]):
+                g.nags.add(chess.pgn.NAG_GOOD_MOVE)
             bad = [d for d in ch.get("moves_info") or [] if d["loss"] >= 0.10]
             good = [d for d in ch.get("moves_info") or [] if d["loss"] < 0.10]
-            if bad and sum(d["p"] for d in bad) >= 0.08:
-                parts.append("PUŁAPKA: naturalne błędy " + ", ".join(
+            err = ch.get("error") or sum(d["p"] for d in bad)
+            if bad and err >= 0.08:
+                label = "PUŁAPKA"
+                if ch.get("moment"):
+                    label = "JEDYNY RUCH" if ch["moment"]["type"] == "only" else "TRUDNY MOMENT"
+                if ch.get("hidden"):
+                    label += " (ukryta)"
+                parts.append(f"{label}: myli się {err * 100:.0f}%, naturalne błędy " + ", ".join(
                     f"{d['san']} ({d['p'] * 100:.0f}%, {fmt_cp(d['cp'])})" for d in bad[:3]))
                 parts.append("dobre: " + ", ".join(f"{d['san']} ({d['p'] * 100:.0f}%)" for d in good[:3]))
             g.comment = "; ".join(parts)

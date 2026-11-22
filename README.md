@@ -17,20 +17,48 @@ Najlepiej w wariantach, które rzadko pojawiają się w partiach.
 
 Szukanie buduje drzewo wariantów:
 
-* **na Twoim ruchu**: ruchy silnika mieszczące się w progu oceny,
+* **na Twoim ruchu**: ruchy silnika mieszczące się w progu oceny; w pozycjach
+  „teoretycznych” (dużo partii) także rzadkie boczne warianty i nowinki,
 * **na ruchu przeciwnika**: ruchy, które ludzie z zakresu rankingu faktycznie grają
-  (Maia-2 zmieszana ze statystykami), plus zawsze najlepszy ruch silnika.
+  (Maia-2 zmieszana ze statystykami), plus najlepsze ruchy silnika. Wszystkie są
+  oceniane jednym przeszukaniem MultiPV, więc oceny dają się porównać.
 
-Najpierw rozwijane są pozycje, do których przeciwnik najczęściej dochodzi. Dla
-każdej pozycji przeciwnika liczona jest **oczekiwana strata**: suma po ruchach
-`p(ruch) × spadek szansy wygranej`, czyli ile przeciwnik średnio „oddaje”,
-grając jak typowy człowiek. Wynikiem jest lista pułapek z:
+Najpierw rozwijane są pozycje, do których przeciwnik najczęściej dochodzi, przy
+założeniu, że broni się dobrze. Dzięki temu po trudnym momencie linia jest
+badana dalej. Wyniki są w trzech zakładkach:
 
-* szansą dojścia do pozycji (ruchy przeciwnika po drodze są prawdopodobne),
-* szansą błędu (jak często zagra ruch, który według silnika psuje mu pozycję),
-* oznaczeniem *jedyny ruch*, gdy tylko jeden ruch trzyma pozycję,
-* liczbą partii w bazie i na Lichess (rzadkość),
-* pełnym drzewem z eksportem do PGN (np. do studium na Lichess albo do ChessBase).
+### Pułapki
+Pozycje, w których co najmniej 8% ludzi z zakresu gra błąd, czyli ruch
+obniżający ich szansę wygranej o 10% lub więcej (jak „mistake” na Lichess).
+Każda pułapka ma:
+* **dojście**: szansę, że przeciwnik sam doprowadzi do tej pozycji,
+* **błąd**: ilu ludzi się tu myli,
+* **siłę**: ile średnio szansy wygranej przeciwnik oddaje,
+* oznaczenie *jedyny ruch*,
+* oznaczenie *ukryta*, gdy nawet silnik na głębokości 6 wybrałby zły ruch.
+  Ruchy, które silnik odrzuca dopiero głębiej, człowiek łatwiej przeoczy (por. jk_182,
+  [„Finding Traps with Stockfish”](https://lichess.org/@/jk_182/blog/finding-traps-with-stockfish/mCX3kCmf)).
+
+### Trudne linie
+Warianty, w których przeciwnik musi kilka razy znaleźć trudny ruch. Trudny moment to:
+* **jedyny ruch**: tylko jeden ruch nie jest błędem, a myli się ≥ 25% ludzi,
+* **trudny wybór**: jest kilka dobrych ruchów, ale myli się większość ludzi.
+
+Dobry ruch nie może być oczywisty: odbiciem bierki, wymuszoną ucieczką z szacha
+ani ruchem, który Maia uważa za naturalny (≥ 50%). Linia pokazuje przebieg przy
+dobrej obronie przeciwnika oraz szansę, że typowy gracz przejdzie ją bez błędu.
+
+### Nowinki
+Twoje ruchy grane rzadko (domyślnie ≤ 10 partii) w pozycji, która jest teorią
+(≥ 50 partii). Według silnika nowinka może być gorsza od najlepszego ruchu
+najwyżej o 0,5 piona i musi mieścić się w progu oceny. Ruch bez żadnej partii
+ma oznaczenie **TN**. Program pokazuje też, co przeciwnik zwykle odpowiada i
+jaka pułapka czeka dalej.
+
+Do tego pełne drzewo z eksportem do PGN: nowinki dostają znaczki `!?` i N,
+trudne momenty są skomentowane, a dobre ruchy przeciwnika oznaczone `!`. Plik
+można wczytać do studium na Lichess albo do ChessBase. Wszystkie progi da się
+zmienić w „Zaawansowane”.
 
 ## Instalacja (Windows)
 

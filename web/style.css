@@ -117,3 +117,16 @@ dialog:has(.promo) { min-width: 0; }
 .trap-body { margin: 4px 0 2px; }
 .badlist { margin: 2px 0 4px; padding-left: 18px; font-size: 13px; }
 .badmv { color: #ff8a7f; }
+
+.form .sub { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; margin-top: 8px; border-top: 1px solid #ffffff14; padding-top: 6px; }
+.hline, .nov { padding: 7px 8px; border-radius: 5px; background: var(--panel2); margin-bottom: 6px; cursor: pointer; border: 1px solid transparent; }
+.hline:hover, .nov:hover { border-color: #555c66; } .hline.sel, .nov.sel { border-color: var(--accent); }
+.moments { margin: 4px 0; padding-left: 20px; font-size: 13px; }
+.moments li { padding: 2px 4px; border-radius: 3px; margin-bottom: 2px; }
+.moments li:hover { background: #ffffff10; }
+.goodmv { color: #8fd694; } .novmv { color: #8fc3f5; font-size: 15px; }
+.nov-move { margin: 3px 0; }
+.tag.hid { background: #9b59b633; color: #d2a8ea; }
+.tag.soft { background: #d9a44133; color: #f0c674; }
+.tag.tn { background: #5b9bd533; color: #9cc8f0; }
+[data-sub="1"] { cursor: pointer; } [data-sub="1"]:hover { text-decoration: underline; }

@@ -69,6 +69,13 @@
           <label>Moje kandydaty (MultiPV) <input id="p-cands" type="number" min="1" max="8" value="4"></label>
           <label>Odpowiedzi przeciwnika (maks.) <input id="p-replies" type="number" min="1" max="8" value="4"></label>
           <label>Pokrycie odpowiedzi przeciwnika <input id="p-cover" type="number" step="0.05" min="0.3" max="1" value="0.85"></label>
+          <div class="sub">Nowinki</div>
+          <label title="O ile nowinka może być gorsza od najlepszego ruchu silnika">Maks. strata vs silnik (pion) <input id="p-nov-loss" type="number" step="0.1" min="0" value="0.5"></label>
+          <label title="Ruch grany najwyżej tyle razy uznajemy za rzadki">„Rzadko” = maks. partii <input id="p-nov-games" type="number" min="0" value="10"></label>
+          <label title="Nowinki szukamy tylko w pozycjach z co najmniej tyloma partiami">„Teoria” = min. partii <input id="p-theory" type="number" min="1" value="50"></label>
+          <div class="sub">Trudne momenty</div>
+          <label title="Trudny moment = co najmniej tyle % ludzi się tu myli">Min. % błędów <input id="p-hard-err" type="number" min="5" max="95" value="25"></label>
+          <label title="Dobry ruch, który Maia daje z co najmniej takim %, jest oczywisty (nie liczy się jako trudny)">Oczywisty ruch = Maia ≥ % <input id="p-obvious" type="number" min="10" max="100" value="50"></label>
           <label class="inline"><input type="checkbox" id="p-lichess" checked> statystyki Lichess</label>
           <label>Baza Lichess
             <select id="p-lsource">
@@ -104,9 +111,13 @@
       </h2>
       <div class="tabs">
         <button data-tab="traps" class="tab active">Pułapki</button>
+        <button data-tab="hard" class="tab">Trudne linie</button>
+        <button data-tab="nov" class="tab">Nowinki</button>
         <button data-tab="tree" class="tab">Drzewo</button>
       </div>
       <div id="tab-traps" class="tab-body"></div>
+      <div id="tab-hard" class="tab-body hidden"></div>
+      <div id="tab-nov" class="tab-body hidden"></div>
       <div id="tab-tree" class="tab-body hidden"></div>
     </div>
   </section>
