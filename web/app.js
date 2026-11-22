@@ -257,6 +257,28 @@ function searchParams() {
   };
 }
 
+// Ustawienia formularza z parametrów wcześniejszego wyszukiwania (odwrotność searchParams).
+function applyParams(p) {
+  const set = (sel, v) => { if (v !== undefined && v !== null) $(sel).value = v; };
+  set("#p-color", p.color);
+  updateEvalLabel();
+  set("#p-eval", ((p.color === "white" ? p.min_eval : -p.min_eval) / 100).toFixed(1));
+  set("#p-drop", p.max_drop / 100);
+  set("#p-elo-min", p.elo_min); set("#p-elo-max", p.elo_max);
+  set("#p-plies", p.max_plies); set("#p-budget", p.budget);
+  set("#p-depth", p.depth); set("#p-vdepth", p.verify_depth);
+  set("#p-cands", p.my_candidates); set("#p-replies", p.opp_max_replies); set("#p-cover", p.opp_coverage);
+  $("#p-lichess").checked = p.use_lichess !== false;
+  set("#p-lsource", p.lichess_source);
+  $("#p-local").checked = p.use_local_db !== false;
+  if (p.speeds) $$(".p-speed").forEach((c) => (c.checked = p.speeds.includes(c.value)));
+  if (p.novelty_max_loss !== undefined) set("#p-nov-loss", p.novelty_max_loss / 100);
+  set("#p-nov-games", p.novelty_max_games); set("#p-theory", p.theory_min_games);
+  if (p.hard_error !== undefined) set("#p-hard-err", Math.round(p.hard_error * 100));
+  if (p.obvious_p !== undefined) set("#p-obvious", Math.round(p.obvious_p * 100));
+  state.orientation = p.color;
+}
+
 function saveHistory(jobId) {
   const hist = { startFen: state.startFen, moves: state.moves.slice(0, state.cursor).map((m) => m.uci) };
   localStorage.setItem("hist-" + jobId, JSON.stringify(hist));
@@ -316,7 +338,20 @@ function gamesStr(local, lichess) {
 }
 
 function showResult(res) {
+  const fresh = !state.result || state.result.id !== res.id;
   state.result = res;
+  if (fresh) {
+    state.marks = {};
+    state.real = null;
+    loadMarks(res);
+    loadReal(res);
+  }
+  renderResults();
+}
+
+function renderResults() {
+  const res = state.result;
+  if (!res) return;
   const tabs = { traps: res.traps || [], hard: res.hard_lines || [], nov: res.novelties || [] };
   $('.tab[data-tab="traps"]').textContent = `Pułapki (${tabs.traps.length})`;
   $('.tab[data-tab="hard"]').textContent = `Trudne linie (${tabs.hard.length})`;
@@ -405,6 +440,7 @@ function syncResults() {
   for (const [tab, f] of Object.entries(found)) {
     if (!f.el) continue;
     if (tab === "tree") f.el.classList.add("cur"); else f.el.classList.add("sel");
+    for (let d = f.el.closest("details.fam"); d; d = d.parentElement.closest("details.fam")) d.open = true;
     $(`.tab[data-tab="${tab}"]`).classList.add("has-match");
   }
   state.matches = found;
@@ -443,12 +479,13 @@ function arrowsFor(good, bad) {
 function bindCards(el, cls, onPick) {
   el.querySelectorAll("." + cls).forEach((d) => {
     d.onclick = (e) => {
-      if (e.target.closest("[data-sub]")) return;
+      if (e.target.closest("[data-sub],[data-act]")) return;
       el.querySelectorAll("." + cls).forEach((x) => x.classList.remove("sel"));
       d.classList.add("sel");
       onPick(+d.dataset.i, null);
     };
     d.querySelectorAll("[data-sub]").forEach((s) => (s.onclick = (e) => {
+      if (e.target.closest("[data-act]")) return;  // przyciski w środku obsługuje bindActions
       e.stopPropagation();
       el.querySelectorAll("." + cls).forEach((x) => x.classList.remove("sel"));
       d.classList.add("sel");
@@ -458,6 +495,324 @@ function bindCards(el, cls, onPick) {
 }
 
 function rangeStr(res) { return `${res.params.elo_min}–${res.params.elo_max}`; }
+
+// ------------------------------------------------------------------ rodziny wariantów
+// Wyniki z tym samym początkiem wariantu idą obok siebie. Serwer zwraca je od najlepszych,
+// więc kolejność rodzin (i wariantów w rodzinie) wyznacza najlepszy wynik w danej rodzinie.
+
+function groupByFamily() { return localStorage.getItem("res-order") !== "score"; }
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// półruch i z listy SAN od pozycji fen; force = numer także przed ruchem czarnych ("7…Nf6")
+function plyText(fen, sans, i, force) {
+  const parts = fen.split(" ");
+  const ply = i + (parts[1] === "b" ? 1 : 0);
+  const no = (+parts[5] || 1) + Math.floor(ply / 2);
+  if (ply % 2 === 0) return `${no}.${sans[i]}`;
+  return (force ? `${no}…` : "") + sans[i];
+}
+
+// Wariant z numerami ruchów; pierwsze `dim` półruchów (wspólne z rodziną) wyszarzone.
+function lineHtml(fen, sans, dim = 0) {
+  dim = Math.max(0, Math.min(dim, sans.length - 1));
+  const a = sans.slice(0, dim).map((_, i) => plyText(fen, sans, i, i === 0)).join(" ");
+  const b = sans.slice(dim).map((_, j) => plyText(fen, sans, dim + j, j === 0)).join(" ");
+  return (a ? `<span class="shared">${a}</span> ` : "") + b;
+}
+
+// zwykły tekst wariantu od półruchu `from`
+function movesText(fen, sans, from = 0) {
+  return sans.slice(from).map((_, j) => plyText(fen, sans, from + j, j === 0)).join(" ");
+}
+
+function familyTree(items, keep = () => true) {
+  const mk = (uci, san) => ({ uci, san, items: [], kids: new Map(), best: Infinity, count: 0 });
+  const root = mk([], []);
+  items.forEach((it, i) => {
+    if (!keep(i)) return;
+    let n = root;
+    n.best = Math.min(n.best, i); n.count++;
+    it.line_uci.forEach((u, d) => {
+      if (!n.kids.has(u)) n.kids.set(u, mk(it.line_uci.slice(0, d + 1), it.line.slice(0, d + 1)));
+      n = n.kids.get(u);
+      n.best = Math.min(n.best, i); n.count++;
+    });
+    n.items.push(i);
+  });
+  // łańcuchy bez rozgałęzień zwijamy w jeden węzeł (np. wspólne "6...Bb6 7.b5 Na5")
+  const compress = (n) => {
+    while (!n.items.length && n.kids.size === 1) {
+      const c = n.kids.values().next().value;
+      Object.assign(n, { uci: c.uci, san: c.san, items: c.items, kids: c.kids });
+    }
+    n.kids.forEach(compress);
+    return n;
+  };
+  return compress(root);
+}
+
+const kidsOf = (n) => [...n.kids.values()].sort((a, b) => a.best - b.best);
+
+// cardFn(i, num, dim) -> HTML karty; i = indeks w wynikach serwera, num = numer na liście
+function renderFamilies(items, rootFen, unitFn, cardFn, keep = () => true) {
+  let num = 0;
+  const kept = items.map((_, i) => i).filter(keep);
+  if (!kept.length) return '<p class="muted">Nic nie pasuje do wybranego filtra.</p>';
+  if (!groupByFamily()) return kept.map((i) => cardFn(i, ++num, 0)).join("");
+  const root = familyTree(items, keep);
+  const MAX_LEVELS = 3;  // głębiej - ta sama kolejność, ale już bez kolejnych nagłówków
+  const deeper = (uci) => `<button type="button" class="link deeper" data-act="deeper" data-line="${uci.join(",")}"
+    title="Nowe wyszukiwanie od tej pozycji, z tymi samymi ustawieniami">szukaj głębiej</button>`;
+  const walk = (n, dim, level) => {
+    let html = n.items.map((i) => cardFn(i, ++num, dim)).join("");
+    const kids = kidsOf(n);
+    for (const c of kids) {
+      // nagłówek tylko tam, gdzie wariant naprawdę się rozgałęzia
+      if (c.count >= 2 && kids.length >= 2 && level < MAX_LEVELS) {
+        html += `<details class="fam" open><summary><span class="fam-line">${lineHtml(rootFen, c.san, dim)}</span>
+          <span class="fam-count">${c.count} ${unitFn(c.count)}</span> ${deeper(c.uci)}</summary>
+          <div class="fam-body">${walk(c, c.uci.length, level + 1)}</div></details>`;
+      } else html += walk(c, dim, level);
+    }
+    return html;
+  };
+  const head = root.uci.length && kept.length > 1
+    ? `<div class="fam-root muted small">Wszystkie zaczynają się od <b>${lineHtml(rootFen, root.san)}</b> ${deeper(root.uci)}</div>` : "";
+  return head + walk(root, root.uci.length, 0);
+}
+
+// Rozdziały eksportu = rodziny najwyższego poziomu (każda osobno), z tym samym filtrem co na liście.
+function exportGroups(kind, perFamily, filter) {
+  const res = state.result;
+  const items = familyItems(kind);
+  const keep = keepFn(kind, filter);
+  const kept = items.map((_, i) => i).filter(keep);
+  const rootFen = res.params.fen;
+  const name = (sans) => (sans.length ? movesText(rootFen, sans) : "Pozycja startowa");
+  if (!perFamily || !kept.length) {
+    const root = familyTree(items, keep);
+    return [{ name: `ChessPrep: ${name(root.san)}`, items: order(root) }];
+  }
+  const root = familyTree(items, keep);
+  const groups = [];
+  if (root.items.length) groups.push({ name: name(root.san), items: root.items.slice() });
+  for (const c of kidsOf(root)) groups.push({ name: `${name(c.san)} (${c.count})`, items: order(c) });
+  return groups;
+  function order(n) { return n.items.concat(...kidsOf(n).map(order)); }
+}
+
+function plural(n, one, few, many) {
+  if (n === 1) return one;
+  const d = n % 10, dd = n % 100;
+  return d >= 2 && d <= 4 && (dd < 12 || dd > 14) ? few : many;
+}
+
+// ------------------------------------------------------------------ filtry, gwiazdki, notatki
+
+const FILTERS = {
+  traps: [["all", "wszystkie"], ["star", "★ moje"], ["verified", "zweryfikowane"], ["hidden", "ukryte"]],
+  hard: [["all", "wszystkie"], ["star", "★ moje"], ["verified", "zweryfikowane"]],
+  nov: [["all", "wszystkie"], ["star", "★ moje"], ["verified", "zweryfikowane"], ["tn", "TN (nigdy nie grane)"]],
+};
+
+function resFilter(kind) { return localStorage.getItem("res-filter-" + kind) || "all"; }
+
+function familyItems(kind) {
+  const res = state.result;
+  if (kind === "traps") return res.traps || [];
+  if (kind === "hard") return res.hard_lines || [];
+  // nowinki grupujemy po pozycji PRZED nowinką - kilka nowinek w tym samym miejscu idzie razem
+  return (res.novelties || []).map((n) => ({ line: n.line.slice(0, -1), line_uci: n.line_uci.slice(0, -1) }));
+}
+
+function rawItems(kind) {
+  const res = state.result;
+  return kind === "traps" ? res.traps || [] : kind === "hard" ? res.hard_lines || [] : res.novelties || [];
+}
+
+function keepFn(kind, f = resFilter(kind)) {
+  const list = rawItems(kind);
+  return (i) => {
+    const it = list[i];
+    if (f === "star") return !!mark(kind, it).star;
+    if (f === "verified") return it.verified === true;
+    if (f === "hidden") return !!it.hidden;
+    if (f === "tn") return it.games === 0;
+    return true;
+  };
+}
+
+function markKey(kind, it) { return kind + ":" + it.line_uci.join(","); }
+function mark(kind, it) { return (state.marks || {})[markKey(kind, it)] || {}; }
+
+async function loadMarks(res) {
+  try { state.marks = await api(`/api/search/${res.id}/marks`); } catch (_) { state.marks = {}; }
+  if (state.result && state.result.id === res.id && Object.keys(state.marks).length) renderResults();
+}
+
+async function saveMark(kind, it, patch) {
+  state.marks = await api(`/api/search/${state.result.id}/marks`, { method: "POST", body: { key: markKey(kind, it), ...patch } });
+}
+
+function markHtml(kind, it) {
+  const m = mark(kind, it);
+  return `<span class="marks"><button type="button" class="icon star ${m.star ? "on" : ""}" data-act="star"
+      title="Do repertuaru (★) - filtr „★ moje” pokaże tylko oznaczone">${m.star ? "★" : "☆"}</button><button type="button"
+      class="icon" data-act="note" title="Notatka">✎</button></span>`;
+}
+
+function noteHtml(kind, it) {
+  const n = mark(kind, it).note;
+  return `<div class="note ${n ? "" : "hidden"}" data-act="note" title="Kliknij, żeby zmienić">${esc(n)}</div>`;
+}
+
+function toolbar(kind) {
+  const fam = groupByFamily();
+  const f = resFilter(kind);
+  return `<div class="res-tools small">
+    <span>Kolejność:
+      <button type="button" class="link ${fam ? "on" : ""}" data-order="family" title="Warianty z tym samym początkiem obok siebie">rodzinami</button> ·
+      <button type="button" class="link ${fam ? "" : "on"}" data-order="score" title="Od najlepszego wyniku, bez grupowania">od najlepszych</button>
+      ${fam ? ' · <button type="button" class="link" data-fold="1" title="Zwiń / rozwiń wszystkie rodziny">zwiń/rozwiń</button>' : ""}</span>
+    <span class="right">Pokaż <select data-filter="${kind}">${FILTERS[kind].map(([v, l]) =>
+      `<option value="${v}" ${v === f ? "selected" : ""}>${l}</option>`).join("")}</select></span></div>`;
+}
+
+function bindToolbar(el) {
+  el.querySelectorAll("[data-order]").forEach((b) => (b.onclick = () => {
+    localStorage.setItem("res-order", b.dataset.order);
+    renderResults();
+  }));
+  el.querySelectorAll("[data-fold]").forEach((b) => (b.onclick = () => {
+    const fams = el.querySelectorAll("details.fam");
+    const close = [...fams].some((d) => d.open);
+    fams.forEach((d) => (d.open = !close));
+  }));
+  el.querySelectorAll("[data-filter]").forEach((s) => (s.onchange = () => {
+    localStorage.setItem("res-filter-" + s.dataset.filter, s.value);
+    renderResults();
+  }));
+}
+
+// ------------------------------------------------------------------ kara za błąd
+
+function refHtml(fen, d, k, m = null) {
+  const attrs = `data-act="ref" data-k="${k}"${m !== null ? ` data-m="${m}"` : ""}`;
+  if (d.pv && d.pv.san && d.pv.san.length > 1) {
+    return `<span class="refute" ${attrs} title="Pokaż karę na szachownicy (dalej strzałką →)">kara: ${movesText(fen, d.pv.san, 1)}</span>`;
+  }
+  return `<button type="button" class="link refute-btn" ${attrs} title="Silnik policzy, jak ukarać ten ruch">jak ukarać?</button>`;
+}
+
+async function showRefutation(it, a) {
+  const mi = a.dataset.m !== undefined ? +a.dataset.m : null;
+  const pos = mi !== null ? it.moments[mi] : it;   // pozycja z polami fen, line_uci, bad
+  const k = +a.dataset.k;
+  const d = pos.bad[k];
+  if (!d.pv || !d.pv.uci || d.pv.uci.length < 2) {
+    a.textContent = "silnik liczy…";
+    try {
+      const r = await api("/api/refute", { method: "POST", body: { fen: pos.fen, uci: d.uci, depth: Math.max(16, state.result.params.depth || 16) } });
+      d.pv = r.pv;
+    } catch (err) { a.textContent = "błąd: " + err.message; return; }
+    if (!d.pv) { a.textContent = "brak linii"; return; }
+    a.outerHTML = refHtml(pos.fen, d, k, mi);
+  }
+  const pv = d.pv.uci;
+  const arrows = [{ from: pv[1].slice(0, 2), to: pv[1].slice(2, 4), color: "#15781b", opacity: 0.85 }];
+  // szachownica: pozycja po złym ruchu, strzałka = jak ukarać; dalej strzałką →
+  await loadLine(state.result, pos.line_uci.concat(pv), arrows, pos.line_uci.length + 1);
+}
+
+// ------------------------------------------------------------------ prawdziwe partie
+
+async function loadReal(res) {
+  if (!(res.traps || []).length) return;
+  try {
+    const r = await api(`/api/search/${res.id}/real`);
+    if (state.result && state.result.id === res.id) { state.real = r; fillReal(); }
+  } catch (_) {
+    state.real = { traps: [], failed: true };
+    fillReal();
+  }
+}
+
+function realHtml(i) {
+  const R = state.real;
+  if (!R) return '<span class="muted">sprawdzam w prawdziwych partiach…</span>';
+  const r = R.traps && R.traps[i];
+  if (!r || (!r.local && !r.lichess)) return `<span class="muted">${R.failed ? "nie udało się sprawdzić partii" : "brak partii z tą pozycją w bazach"}</span>`;
+  const lname = { players: "lichess", masters: "masters", both: "lichess+masters" }[R.lichess_source] || "lichess";
+  const src = (name, s) => {
+    if (!s) return "";
+    const after = s.score_after_bad != null && s.fell >= 3
+      ? `, potem Twój wynik <b>${pctStr(s.score_after_bad)}</b>${s.score_overall != null ? ` <span class="muted">(ogólnie ${pctStr(s.score_overall)})</span>` : ""}` : "";
+    return `${name}: wpadło <b>${s.fell.toLocaleString("pl")}</b> z ${s.total.toLocaleString("pl")} (${pctStr(s.fell_pct)})${after}`;
+  };
+  return "W partiach – " + [src("baza", r.local), src(lname, r.lichess)].filter(Boolean).join(" · ");
+}
+
+function fillReal() { $$("#tab-traps [data-real]").forEach((e) => (e.innerHTML = realHtml(+e.dataset.real))); }
+
+// ------------------------------------------------------------------ szukaj głębiej
+
+async function searchDeeper(line) {
+  const res = state.result;
+  if (state.job) { $("#job").textContent = "Trwa inne wyszukiwanie - poczekaj albo je przerwij."; return; }
+  applyParams(res.params);
+  await loadLine(res, line ? line.split(",") : [], []);
+  $("#job").textContent = "Nowe wyszukiwanie od wybranej rodziny…";
+  $("#btn-search").scrollIntoView({ block: "nearest", behavior: "smooth" });
+  startSearch();
+}
+
+// ------------------------------------------------------------------ akcje na kartach (wspólne)
+
+function bindActions(el, kind) {
+  el.onclick = async (e) => {
+    const a = e.target.closest("[data-act]");
+    if (!a || !el.contains(a)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const act = a.dataset.act;
+    if (act === "deeper") return searchDeeper(a.dataset.line);
+    if (act === "noop") return;
+    const card = a.closest("[data-i]");
+    if (!card) return;
+    const it = rawItems(kind)[+card.dataset.i];
+    if (act === "star") {
+      const star = !mark(kind, it).star;
+      await saveMark(kind, it, { star });
+      a.classList.toggle("on", star);
+      a.textContent = star ? "★" : "☆";
+      if (resFilter(kind) === "star") renderResults();
+    } else if (act === "note") {
+      if (card.querySelector(".note-edit")) { card.querySelector(".note-edit textarea").focus(); return; }
+      card.querySelector(".trap-head").insertAdjacentHTML("afterend", `<div class="note-edit" data-act="noop">
+        <textarea rows="2" placeholder="Twoja notatka (np. kiedy to zagrać, co zapamiętać)…">${esc(mark(kind, it).note || "")}</textarea>
+        <div class="row"><button type="button" class="small primary" data-act="note-save">Zapisz</button>
+        <button type="button" class="small ghost" data-act="note-cancel">Anuluj</button></div></div>`);
+      card.querySelector(".note-edit textarea").focus();
+    } else if (act === "note-save" || act === "note-cancel") {
+      const ed = card.querySelector(".note-edit");
+      if (act === "note-save") {
+        const note = ed.querySelector("textarea").value.trim();
+        await saveMark(kind, it, { note });
+        const div = card.querySelector(".note");
+        div.textContent = note;
+        div.classList.toggle("hidden", !note);
+      }
+      ed.remove();
+    } else if (act === "ref") {
+      showRefutation(it, a);
+    }
+  };
+}
+
+// ------------------------------------------------------------------ karty wyników
 
 function renderTraps(res) {
   const color = res.params.color;
@@ -472,36 +827,45 @@ function renderTraps(res) {
     <p><b>Dojście</b> – jak często przeciwnik sam doprowadzi do tej pozycji swoimi typowymi ruchami.
     <b>Błąd</b> – ilu ludzi zagra tu zły ruch. <b>Siła</b> – średnio ile % szansy wygranej przeciwnik tu oddaje.
     <span class="tag hid">ukryta</span> – nawet silnik na małej głębokości wybrałby zły ruch (refutacja jest głęboka).
-    <span class="tag">jedyny ruch</span> – tylko jeden ruch nie jest błędem. Oceny zawsze z perspektywy białych.</p></details>`;
+    <span class="tag">jedyny ruch</span> – tylko jeden ruch nie jest błędem. Oceny zawsze z perspektywy białych.</p>
+    <p><b>Kara</b> – jak silnik wykorzystuje błąd (kliknij, żeby zobaczyć na szachownicy, dalej strzałką →).
+    <b>W partiach</b> – ilu graczy z wybranego rankingu naprawdę wpadło w tę pułapkę w bazie / na Lichess i jaki potem
+    był Twój wynik (dla porównania: wynik ze wszystkich partii z tą pozycją). ★ oznacza pułapkę do repertuaru.</p></details>`;
   if (!traps.length) {
     el.innerHTML = help + `<p class="muted">Brak pułapek. Spróbuj większej liczby pozycji, innego zakresu rankingu
       albo łagodniejszego progu oceny.</p>`;
     return;
   }
-  el.innerHTML = help + `<p class="muted small">Przeanalizowano ${res.analysed} pozycji. Od najlepszych: częste dojście × częsty i duży błąd.</p>` +
-    traps.map((t, i) => {
-      const line = t.line.length ? lineText(rootFen, t.line) : "(od razu w tej pozycji)";
+  el.innerHTML = help + `<p class="muted small">Przeanalizowano ${res.analysed} pozycji. Najlepsze = częste dojście × częsty i duży błąd.</p>` +
+    toolbar("traps") + renderFamilies(traps, rootFen, (n) => plural(n, "pułapka", "pułapki", "pułapek"), (i, num, dim) => {
+      const t = traps[i];
+      const line = t.line.length ? lineHtml(rootFen, t.line, dim) : "(od razu w tej pozycji)";
       const ev = (d) => fmtEval(myToWhite(d.cp, color));
-      const bad = t.bad.slice(0, 3).map((d) =>
-        `<li><b class="badmv">${mvNo(t.fen, d.san)}</b> – zagra to ok. <b>${pctStr(d.p)}</b> graczy, ocena spada do <b>${ev(d)}</b></li>`).join("");
+      const bad = t.bad.slice(0, 3).map((d, k) =>
+        `<li><b class="badmv">${mvNo(t.fen, d.san)}</b> – zagra to ok. <b>${pctStr(d.p)}</b> graczy, ocena spada do <b>${ev(d)}</b>
+          <div class="small">${refHtml(t.fen, d, k)}</div></li>`).join("");
       const good = t.good.slice(0, 3).map((d) => `${mvNo(t.fen, d.san)} <small>(${pctStr(d.p)}, ${ev(d)})</small>`).join(", ");
-      return `<div class="trap" data-i="${i}">
-        <div class="trap-head"><span class="num">#${i + 1}</span><span class="line">${line}</span></div>
+      return `<div class="trap ${mark("traps", t).star ? "starred" : ""}" data-i="${i}">
+        <div class="trap-head"><span class="num">#${num}</span><span class="line">${line}</span>${markHtml("traps", t)}</div>
+        ${noteHtml("traps", t)}
         <div class="trap-body">
           <div class="muted small">Ruch ${oppName}. Naturalne, ale złe:</div>
           <ul class="badlist">${bad}</ul>
           <div class="small">${t.only_move ? '<span class="tag">jedyny dobry ruch</span> ' : '<span class="muted">Dobre odpowiedzi:</span> '}${good}</div>
+          <div class="real small" data-real="${i}" title="Prawdziwe partie z wybranego zakresu rankingu: ile razy zagrano zły ruch i jak potem kończyły się partie (wynik z Twojej perspektywy)">${realHtml(i)}</div>
         </div>
         <div class="trap-meta">
           <span title="Szansa, że przeciwnik swoimi typowymi ruchami doprowadzi do tej pozycji">dojście <b>${pctStr(t.reach)}</b></span>
-          <span title="Ile % ludzi popełnia tu błąd">błąd <b>${pctStr(t.error_chance)}</b></span>
+          <span title="Ile % ludzi popełnia tu błąd (przewidywanie Maia-2 + statystyki)">błąd <b>${pctStr(t.error_chance)}</b></span>
           <span title="Średnio ile % szansy wygranej przeciwnik tu oddaje">siła <b>${(t.trick * 100).toFixed(1)}</b></span>
           ${t.hidden ? '<span class="tag hid" title="Silnik na małej głębokości też wybrałby zły ruch">ukryta</span>' : ""}
           ${t.verified === true ? '<span class="tag ok" title="Twoje ruchy w linii sprawdzone na większej głębokości">✓ zweryfikowane</span>' : ""}
           <span class="muted" title="Liczba partii z tą pozycją (wybrany zakres rankingu)">${gamesStr(t.local_games, t.lichess_games)}</span>
         </div>
       </div>`;
-    }).join("");
+    }, keepFn("traps"));
+  bindToolbar(el);
+  bindActions(el, "traps");
   bindCards(el, "trap", (i) => {
     const t = traps[i];
     loadLine(res, t.line_uci, arrowsFor(t.good, t.bad));
@@ -521,24 +885,27 @@ function renderHard(res) {
     i tak by zagrał (Maia ≥ ${Math.round((res.params.obvious_p ?? 0.5) * 100)}%).</p>
     <p>Linia pokazuje przebieg, w którym przeciwnik <b>za każdym razem broni się dobrze</b> – dla Ciebie to gotowy
     repertuar na najlepszą obronę. <b>Przejdzie bez błędu</b> = szansa, że typowy gracz znajdzie wszystkie trudne ruchy.
-    <b>Dojście</b> = szansa, że w ogóle dojdzie do pierwszego trudnego momentu. Kliknij moment, żeby zobaczyć go na szachownicy.</p></details>`;
+    <b>Dojście</b> = szansa, że w ogóle dojdzie do pierwszego trudnego momentu. Kliknij moment, żeby zobaczyć go na szachownicy,
+    a „karę”, żeby zobaczyć, jak wykorzystać błąd.</p></details>`;
   if (!lines.length) {
     el.innerHTML = help + `<p class="muted">Brak trudnych linii. Pomaga większa liczba pozycji, większa głębokość
       wariantu albo obniżenie progu „trudny moment” w ustawieniach zaawansowanych.</p>`;
     return;
   }
-  el.innerHTML = help + lines.map((h, i) => {
+  el.innerHTML = help + toolbar("hard") + renderFamilies(lines, rootFen, (n) => plural(n, "linia", "linie", "linii"), (i, num, dim) => {
+    const h = lines[i];
     const ev = (d) => fmtEval(myToWhite(d.cp, color));
     const moments = h.moments.map((m, j) => {
       const good = m.good.map((g) => `<b class="goodmv">${mvNo(m.fen, g.san)}!</b> <small>(znajduje ${pctStr(g.p)})</small>`).join(" lub ");
-      const bad = m.bad.slice(0, 2).map((b) => `${mvNo(m.fen, b.san)} <small>${pctStr(b.p)} → ${ev(b)}</small>`).join(", ");
+      const bad = m.bad.slice(0, 2).map((b, k) => `${mvNo(m.fen, b.san)} <small>${pctStr(b.p)} → ${ev(b)}</small> <small>${refHtml(m.fen, b, k, j)}</small>`).join("; ");
       const kind = m.type === "only" ? '<span class="tag">jedyny ruch</span>' : '<span class="tag soft">trudny wybór</span>';
       return `<li data-sub="${j}" class="moment" title="Pokaż tę pozycję">
         ${kind} ${m.hidden ? '<span class="tag hid">ukryta</span>' : ""}
         ${good} – myli się <b>${pctStr(m.error)}</b>${bad ? `, np. ${bad}` : ""}</li>`;
     }).join("");
-    return `<div class="hline" data-i="${i}">
-      <div class="trap-head"><span class="num">#${i + 1}</span><span class="line">${lineText(rootFen, h.line)}</span></div>
+    return `<div class="hline ${mark("hard", h).star ? "starred" : ""}" data-i="${i}">
+      <div class="trap-head"><span class="num">#${num}</span><span class="line">${lineHtml(rootFen, h.line, dim)}</span>${markHtml("hard", h)}</div>
+      ${noteHtml("hard", h)}
       <div class="muted small">${oppName} muszą znaleźć ${h.moments.length} ${h.moments.length === 1 ? "trudny ruch" : "trudne ruchy"}:</div>
       <ol class="moments">${moments}</ol>
       <div class="trap-meta">
@@ -548,7 +915,9 @@ function renderHard(res) {
         <span class="muted">${gamesStr(h.local_games, h.lichess_games)}</span>
       </div>
     </div>`;
-  }).join("");
+  }, keepFn("hard"));
+  bindToolbar(el);
+  bindActions(el, "hard");
   bindCards(el, "hline", (i, sub) => {
     const h = lines[i];
     const m = h.moments[sub === null ? 0 : sub];
@@ -574,17 +943,19 @@ function renderNovelties(res) {
       albo dopuszczalną stratę.</p>`;
     return;
   }
-  el.innerHTML = help + novs.map((n, i) => {
+  el.innerHTML = help + toolbar("nov") + renderFamilies(familyItems("nov"), rootFen, (k) => plural(k, "nowinka", "nowinki", "nowinek"), (i, num, dim) => {
+    const n = novs[i];
     const before = n.line.slice(0, -1);
-    const pre = before.length ? lineText(rootFen, before) : "W pozycji startowej";
+    const pre = before.length ? lineHtml(rootFen, before, dim) : "W pozycji startowej";
     const ev = (cp) => fmtEval(myToWhite(cp, color));
     const replies = (n.replies || []).map((d) => `${mvNo(n.fen, d.san)} <small>${pctStr(d.p)}${d.loss >= 0.1 ? " – błąd → " + ev(d.cp) : ""}</small>`).join(", ");
     const follow = n.follow_trap
       ? `<div class="small" data-sub="1" title="Pokaż pułapkę"><span class="muted">Dalej pułapka:</span> ${lineText(rootFen, n.follow_trap.line)}
          <small>(błąd ${pctStr(n.follow_trap.error)})</small></div>` : "";
     const games = n.games === 0 ? '<span class="tag tn">TN</span> nigdy nie grane' : `grane <b>${n.games}</b>×`;
-    return `<div class="nov" data-i="${i}">
-      <div class="trap-head"><span class="num">#${i + 1}</span><span class="line">${pre}</span></div>
+    return `<div class="nov ${mark("nov", n).star ? "starred" : ""}" data-i="${i}">
+      <div class="trap-head"><span class="num">#${num}</span><span class="line">${pre}</span>${markHtml("nov", n)}</div>
+      ${noteHtml("nov", n)}
       <div class="nov-move"><b class="novmv">${mvNo(n.parent_fen, n.san)}!?</b> N
         <span class="muted small">– ${games} na ${(n.parent_games || 0).toLocaleString("pl")} partii w tej pozycji</span></div>
       <div class="small">Ocena <b>${ev(n.eval)}</b> · najlepszy ruch silnika ${n.best_san ? mvNo(n.parent_fen, n.best_san) : "?"} ${ev(n.best_cp)}
@@ -596,7 +967,9 @@ function renderNovelties(res) {
         ${n.error >= 0.08 ? `<span>od razu błąd u <b>${pctStr(n.error)}</b> ludzi</span>` : ""}
       </div>
     </div>`;
-  }).join("");
+  }, keepFn("nov"));
+  bindToolbar(el);
+  bindActions(el, "nov");
   bindCards(el, "nov", (i, sub) => {
     const n = novs[i];
     if (sub === 1 && n.follow_trap) loadLine(res, n.follow_trap.line_uci, []);
@@ -604,14 +977,20 @@ function renderNovelties(res) {
   });
 }
 
-async function loadLine(res, ucis, arrows) {
-  const hist = JSON.parse(localStorage.getItem("hist-" + res.id) || "null");
+function searchHistory(res) {
+  return JSON.parse(localStorage.getItem("hist-" + res.id) || "null");
+}
+
+// upTo = ile ruchów z `ucis` pokazać na szachownicy (reszta dostępna strzałką →)
+async function loadLine(res, ucis, arrows, upTo = null) {
+  const hist = searchHistory(res);
   const startFen = hist ? hist.startFen : res.params.fen;
-  const all = (hist ? hist.moves : []).concat(ucis);
+  const pre = hist ? hist.moves : [];
+  const all = pre.concat(ucis);
   const r = await api("/api/line", { method: "POST", body: { fen: startFen, moves: all } });
   state.startFen = startFen;
   state.moves = r.moves;
-  state.cursor = r.moves.length;
+  state.cursor = upTo === null ? r.moves.length : Math.min(r.moves.length, pre.length + upTo);
   state.arrows = arrows || [];
   refresh();
 }
@@ -830,6 +1209,129 @@ $("#btn-new").onclick = () => {
   state.arrows = [];
   refresh();
 };
+// ------------------------------------------------------------------ eksport do studium Lichess
+
+function exportBody() {
+  const kind = $("#exp-kind").value;
+  const groups = exportGroups(kind, $("#exp-fam").checked, $("#exp-filter").value);
+  const list = rawItems(kind);
+  const notes = {};
+  groups.forEach((g) => g.items.forEach((i) => { const n = mark(kind, list[i]).note; if (n) notes[i] = n; }));
+  const hist = searchHistory(state.result);
+  const old = document.querySelector('input[name="exp-target"]:checked').value === "old";
+  return {
+    kind, groups, notes,
+    prefix: hist ? { start_fen: hist.startFen, moves: hist.moves } : null,
+    study: old ? $("#exp-study").value.trim() : null,
+    new_name: $("#exp-name").value.trim(),
+    visibility: $("#exp-vis").value,
+  };
+}
+
+function kindUnit(kind, n) {
+  if (kind === "traps") return plural(n, "pułapka", "pułapki", "pułapek");
+  if (kind === "hard") return plural(n, "linia", "linie", "linii");
+  return plural(n, "nowinka", "nowinki", "nowinek");
+}
+
+function updateExportInfo() {
+  const kind = $("#exp-kind").value;
+  const f = $("#exp-filter");
+  if (f.dataset.kind !== kind) {
+    f.innerHTML = FILTERS[kind].map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+    f.value = resFilter(kind);
+    f.dataset.kind = kind;
+  }
+  const groups = exportGroups(kind, $("#exp-fam").checked, f.value);
+  const n = groups.reduce((a, g) => a + g.items.length, 0);
+  const many = groups.length > 64;
+  $("#exp-count").innerHTML = n
+    ? `${n} ${kindUnit(kind, n)} w ${groups.length} ${plural(groups.length, "rozdziale", "rozdziałach", "rozdziałach")}${many ? ' <span class="badtxt">(Lichess przyjmie najwyżej 64)</span>' : ""}:
+       <span class="muted">${groups.slice(0, 6).map((g) => esc(g.name)).join(" · ")}${groups.length > 6 ? " …" : ""}</span>`
+    : '<span class="badtxt">Nic nie pasuje do wybranego filtra.</span>';
+  $("#exp-send").disabled = !n || !state.tokenOk;
+  $("#exp-copy").disabled = !n;
+}
+
+async function checkExportToken() {
+  const box = $("#exp-token");
+  box.textContent = "Sprawdzam token Lichess…";
+  state.tokenOk = false;
+  updateExportInfo();
+  let t;
+  try { t = await api("/api/lichess/token"); } catch (e) { box.innerHTML = `<span class="badtxt">${esc(e.message)}</span>`; return; }
+  const form = `<div class="row left"><input id="exp-new-token" type="password" placeholder="wklej nowy token lip_…">
+    <button type="button" id="exp-save-token">Zapisz token</button></div>`;
+  const link = `<a href="${t.create_url}" target="_blank" rel="noopener">utwórz token z uprawnieniami do studiów</a>
+    <span class="path">(${esc(t.create_url)})</span>`;
+  if (t.valid === null) box.innerHTML = `<span class="badtxt">Nie udało się sprawdzić tokenu: ${esc(t.error)}</span>`;
+  else if (!t.valid) box.innerHTML = `<span class="badtxt">Brak ważnego tokenu Lichess.</span> Na Lichess ${link}, potem wklej go tutaj:${form}`;
+  else if (!t.can_write) box.innerHTML = `Token konta <b>${esc(t.user)}</b> nie ma uprawnienia do zapisu studiów (study:write).
+    Na Lichess ${link} – zadziała też dla statystyk – i wklej go tutaj:${form}`;
+  else { box.innerHTML = `Konto Lichess: <b>${esc(t.user)}</b> – można zapisywać studia.`; state.tokenOk = true; }
+  const save = $("#exp-save-token");
+  if (save) save.onclick = async () => {
+    const v = $("#exp-new-token").value.trim();
+    if (!v) return;
+    await api("/api/settings", { method: "POST", body: { lichess_token: v } });
+    await checkExportToken();
+    loadStatus();
+  };
+  updateExportInfo();
+}
+
+function openExport() {
+  const res = state.result;
+  if (!res) return;
+  const active = ($(".tab.active") || {}).dataset?.tab;
+  $("#exp-kind").value = ["traps", "hard", "nov"].includes(active) ? active : "traps";
+  $("#exp-filter").dataset.kind = "";
+  const hist = searchHistory(res);
+  let opening = "";
+  if (hist && hist.moves.length) opening = movesText(hist.startFen, state.moves.slice(0, hist.moves.length).map((m) => m.san));
+  if (!hist || state.moves.length < (hist ? hist.moves.length : 0)) opening = "";
+  $("#exp-name").value = ("ChessPrep " + (opening || (res.params.color === "white" ? "białe" : "czarne"))).slice(0, 100);
+  $("#exp-msg").textContent = "";
+  updateExportInfo();
+  $("#dlg-export").showModal();
+  checkExportToken();
+}
+
+$("#btn-export").onclick = openExport;
+$("#exp-kind").onchange = updateExportInfo;
+$("#exp-filter").onchange = updateExportInfo;
+$("#exp-fam").onchange = updateExportInfo;
+document.querySelectorAll('input[name="exp-target"]').forEach((r) => (r.onchange = () => {
+  const old = document.querySelector('input[name="exp-target"]:checked').value === "old";
+  $("#exp-study").disabled = !old;
+  $("#exp-name").disabled = old;
+  $("#exp-vis").disabled = old;
+}));
+$("#exp-copy").onclick = async () => {
+  try {
+    const pgn = await api(`/api/search/${state.result.id}/chapters_pgn`, { method: "POST", body: exportBody() });
+    try { await navigator.clipboard.writeText(pgn); $("#exp-msg").textContent = "PGN (wszystkie rozdziały) skopiowany do schowka."; }
+    catch (_) { $("#dlg-export").close(); $("#paste-text").value = pgn; $("#dlg-paste").showModal(); }
+  } catch (e) { $("#exp-msg").innerHTML = `<span class="badtxt">${esc(e.message)}</span>`; }
+};
+$("#exp-send").onclick = async () => {
+  const body = exportBody();
+  if (body.study === "") { $("#exp-msg").innerHTML = '<span class="badtxt">Wklej adres studium.</span>'; return; }
+  const n = Math.min(64, body.groups.length);
+  $("#exp-send").disabled = true;
+  $("#exp-msg").textContent = `Wysyłam ${n} ${plural(n, "rozdział", "rozdziały", "rozdziałów")} do Lichess…`;
+  try {
+    const r = await api(`/api/search/${state.result.id}/lichess_study`, { method: "POST", body });
+    $("#exp-msg").innerHTML = `Gotowe: ${r.chapters} ${plural(r.chapters, "rozdział", "rozdziały", "rozdziałów")} w studium
+      <a href="${r.url}" target="_blank" rel="noopener">${r.url}</a>
+      ${r.errors.length ? `<br><span class="badtxt">Problemy: ${r.errors.map(esc).join("; ")}</span>` : ""}`;
+  } catch (e) {
+    $("#exp-msg").innerHTML = `<span class="badtxt">${esc(e.message)}</span>`;
+  } finally {
+    $("#exp-send").disabled = !state.tokenOk;
+  }
+};
+
 $("#btn-pgn").onclick = async () => {
   const id = (state.result && state.result.id) || $("#saved").value;
   if (!id) return;

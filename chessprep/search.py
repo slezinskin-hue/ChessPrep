@@ -333,11 +333,13 @@ class Searcher:
         # Wszystkie kandydaty (ludzkie + najlepsze silnika) oceniamy JEDNYM przeszukaniem
         # MultiPV z ograniczeniem do tych ruchów - wtedy oceny są ze sobą porównywalne.
         cands = list(dict.fromkeys(chosen + [l.move for l in lines]))
+        pvs: dict[str, list[str]] = {l.move: l.pv for l in lines}
         if len(cands) > 1:
             full = self.eng.analyse(b, depth=p.depth, multipv=len(cands),
                                     moves=[chess.Move.from_uci(u) for u in cands])
             if full:
                 evals = {l.move: self.my_cp(l) for l in full}
+                pvs.update({l.move: l.pv for l in full})
         best_u = min(evals, key=evals.get)  # przeciwnik minimalizuje naszą ocenę
         opp_best = evals[best_u]
         node.best_cp = node.my_cp = opp_best
@@ -353,6 +355,8 @@ class Searcher:
             info.append({"uci": u, "san": b.san(chess.Move.from_uci(u)), "p": round(pr, 4),
                          "maia": round(maia.get(u, 0.0), 4), "games": counts.get(u, 0),
                          "cp": cp, "loss": round(loss, 4), "best": u == best_u})
+            if loss >= MISTAKE:  # jak ukarać błąd: linia silnika po złym ruchu
+                info[-1]["pv"] = refutation(b, pvs.get(u, []))
         good = [d for d in info if d["loss"] < MISTAKE]
         bad = [d for d in info if d["loss"] >= MISTAKE]
         # Czy pozostałe (nieocenione) ruchy też są błędami? Tak, jeśli drugi najlepszy ruch
@@ -435,7 +439,8 @@ class Searcher:
             "type": "only" if node.only_move else "hard",
             "error": round(node.error, 4),
             "good": [{"san": d["san"], "uci": d["uci"], "p": d["p"], "cp": d["cp"]} for d in good],
-            "bad": [{"san": d["san"], "uci": d["uci"], "p": d["p"], "cp": d["cp"]} for d in bad_sorted[:3]],
+            "bad": [{"san": d["san"], "uci": d["uci"], "p": d["p"], "cp": d["cp"], "pv": d.get("pv")}
+                    for d in bad_sorted[:3]],
             "hidden": node.hidden,
         }
 
@@ -710,6 +715,26 @@ class Searcher:
                 "lichess_error": self.stats.lichess.error,
                 "traps": trap_list, "hard_lines": hard_list, "novelties": nov_list,
                 "tree": self._node_json(self.root)}
+
+
+REFUTATION_PLIES = 9  # zły ruch + 4 ruchy kary z każdej strony
+
+
+def refutation(board: chess.Board, pv: list[str], plies: int = REFUTATION_PLIES) -> dict | None:
+    """Linia silnika zaczynająca się od złego ruchu -> {"uci": [...], "san": [...]}."""
+    b = board.copy(stack=False)
+    uci, san = [], []
+    for u in pv[:plies]:
+        try:
+            mv = chess.Move.from_uci(u)
+        except ValueError:
+            break
+        if mv not in b.legal_moves:
+            break
+        san.append(b.san(mv))
+        uci.append(u)
+        b.push(mv)
+    return {"uci": uci, "san": san} if len(uci) >= 2 else None
 
 
 def p_depth(p: SearchParams) -> int:

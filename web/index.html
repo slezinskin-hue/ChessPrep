@@ -108,6 +108,7 @@
         <span class="right">
           <select id="saved"></select>
           <button id="btn-pgn" class="ghost small" title="Eksport drzewa do PGN">PGN</button>
+          <button id="btn-export" class="ghost small" title="Eksport do studium Lichess (rozdziały = rodziny wariantów)">Lichess</button>
           <button id="btn-close-res" class="ghost small hidden" title="Zamknij wyniki - wróć do ustawiania pozycji">✕ Zamknij</button>
         </span>
       </h2>
@@ -171,6 +172,48 @@
 
     <div id="set-msg" class="small"></div>
     <div class="row"><button value="cancel">Zamknij</button><button id="set-save" value="ok" class="primary">Zapisz token</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-export">
+  <form method="dialog" class="settings export">
+    <h3>Eksport do studium Lichess</h3>
+    <div id="exp-token" class="setbox small">Sprawdzam token…</div>
+    <div class="exp-grid">
+      <label>Co wysłać
+        <select id="exp-kind">
+          <option value="traps">pułapki</option>
+          <option value="hard">trudne linie</option>
+          <option value="nov">nowinki</option>
+        </select>
+      </label>
+      <label>Które
+        <select id="exp-filter"></select>
+      </label>
+    </div>
+    <label class="inline"><input type="checkbox" id="exp-fam" checked> osobny rozdział dla każdej rodziny wariantów</label>
+    <div id="exp-count" class="small muted"></div>
+    <section>
+      <label class="inline"><input type="radio" name="exp-target" value="new" checked> nowe studium</label>
+      <div class="exp-grid" id="exp-new">
+        <label>Nazwa <input id="exp-name" maxlength="100"></label>
+        <label>Widoczność
+          <select id="exp-vis">
+            <option value="private">prywatne</option>
+            <option value="unlisted">przez link</option>
+            <option value="public">publiczne</option>
+          </select>
+        </label>
+      </div>
+      <label class="inline"><input type="radio" name="exp-target" value="old"> dodaj rozdziały do istniejącego studium</label>
+      <input id="exp-study" placeholder="https://lichess.org/study/AbCd1234" disabled>
+    </section>
+    <div id="exp-msg" class="small"></div>
+    <div class="row">
+      <button type="button" id="exp-copy" class="ghost" title="Te same rozdziały jako PGN do schowka (np. do ChessBase)">Kopiuj PGN</button>
+      <button value="cancel">Zamknij</button>
+      <button type="button" id="exp-send" class="primary">Wyślij do Lichess</button>
+    </div>
   </form>
 </dialog>
 

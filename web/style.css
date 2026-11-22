@@ -146,3 +146,46 @@ dialog:has(.promo) { min-width: 0; }
 .card h2 .right { min-width: 0; text-transform: none; letter-spacing: 0; }
 #saved { min-width: 0; max-width: 100%; flex: 1 1 auto; text-overflow: ellipsis; }
 #btn-pgn, #btn-close-res { flex: none; white-space: nowrap; }
+
+/* rodziny wariantów w wynikach */
+.order-switch { margin: 2px 0 8px; color: var(--muted); }
+button.link { background: none; border: none; padding: 0; color: var(--muted); cursor: pointer; font: inherit; text-decoration: underline dotted; }
+button.link:hover { color: var(--text, #ddd); }
+button.link.on { color: var(--accent); text-decoration: none; font-weight: 600; cursor: default; }
+.fam-root { margin: 0 0 6px; }
+details.fam { margin: 6px 0; }
+details.fam > summary { cursor: pointer; padding: 4px 6px; border-radius: 4px; background: #ffffff0d; list-style-position: inside; }
+details.fam > summary:hover { background: #ffffff17; }
+details.fam > summary .fam-line { font-weight: 600; }
+details.fam > summary .fam-count { color: var(--muted); font-size: 12px; margin-left: 6px; white-space: nowrap; }
+.fam-body { margin-left: 6px; padding-left: 8px; border-left: 2px solid #5b9bd544; }
+.line .shared, .fam-line .shared { color: var(--muted); font-weight: normal; }
+
+/* pasek nad wynikami: kolejność + filtr */
+.res-tools { display: flex; align-items: center; gap: 8px; margin: 2px 0 8px; color: var(--muted); flex-wrap: wrap; }
+.res-tools select { padding: 1px 4px; font-size: 12px; }
+/* gwiazdki i notatki */
+.trap-head .marks { margin-left: auto; display: inline-flex; gap: 2px; flex: none; }
+button.icon { background: none; border: none; padding: 0 3px; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; }
+button.icon:hover { color: var(--text); }
+button.icon.star.on { color: #f0c674; }
+.trap.starred, .hline.starred, .nov.starred { border-left: 3px solid #f0c674; }
+.note { margin: 4px 0; padding: 4px 8px; background: #f0c6741a; border-left: 2px solid #f0c674; border-radius: 3px; font-size: 12px; white-space: pre-wrap; cursor: text; }
+.note-edit { margin: 4px 0; display: flex; flex-direction: column; gap: 4px; }
+.note-edit textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 12px; }
+/* kara za błąd */
+.refute { color: #8fd694; cursor: pointer; border-bottom: 1px dotted #8fd69488; }
+.refute:hover { color: #b5f0b9; }
+button.link.refute-btn { color: #8fd694; }
+/* prawdziwe partie */
+.real { margin-top: 4px; padding-top: 4px; border-top: 1px dashed #ffffff1a; }
+/* szukaj głębiej */
+button.link.deeper { margin-left: 8px; font-size: 11px; color: var(--accent); }
+/* okno eksportu */
+dialog .exp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 6px 0; }
+dialog label.inline { flex-direction: row; align-items: center; gap: 6px; }
+dialog.export-open { min-width: 520px; }
+#dlg-export { width: 560px; }
+#dlg-export section { margin: 8px 0; }
+#dlg-export a, .setbox a { color: var(--accent); }
+#exp-study { width: 100%; box-sizing: border-box; }

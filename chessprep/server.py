@@ -20,6 +20,8 @@ from . import engine as engine_mod
 from . import explorer as explorer_mod
 from . import human as human_mod
 from .config import CONFIG, DATA_DIR, WEB_DIR
+from . import search as search_mod
+from . import study as study_mod
 from .search import JobManager, SearchParams
 
 app = FastAPI(title="ChessPrep", version=__version__)
@@ -227,6 +229,9 @@ def searches():
 @app.delete("/api/search/{job_id}")
 def search_delete(job_id: str):
     jobs.delete(job_id)
+    allm = _marks_all()
+    if allm.pop(job_id, None) is not None:
+        MARKS_FILE.write_text(json.dumps(allm, ensure_ascii=False, indent=1), encoding="utf-8")
     return {"ok": True}
 
 
@@ -287,6 +292,174 @@ def search_pgn(job_id: str):
     if res is None:
         raise HTTPException(404, "Brak wyników")
     return _tree_to_pgn(res)
+
+
+def _result(job_id: str) -> dict:
+    job = jobs.jobs.get(job_id)
+    res = job.result if job is not None and job.result is not None else jobs.load(job_id)
+    if res is None:
+        raise HTTPException(404, "Brak wyników")
+    return res
+
+
+# ------------------------------------------------------------------ kara za błąd
+
+class RefuteReq(BaseModel):
+    fen: str
+    uci: str
+    depth: int = 18
+
+
+@app.post("/api/refute")
+def refute(req: RefuteReq):
+    """Jak ukarać zły ruch: linia silnika zaczynająca się od tego ruchu."""
+    b = _board(req.fen)
+    try:
+        mv = chess.Move.from_uci(req.uci)
+    except ValueError:
+        raise HTTPException(400, "Zły ruch")
+    if not b.is_legal(mv):
+        raise HTTPException(400, "Nielegalny ruch")
+    lines = engine_mod.shared().analyse(b, depth=max(8, min(26, req.depth)), multipv=1, moves=[mv])
+    if not lines:
+        raise HTTPException(500, "Silnik nie zwrócił analizy")
+    return {"pv": search_mod.refutation(b, lines[0].pv), "cp": lines[0].cp}
+
+
+# ------------------------------------------------------------------ prawdziwe partie
+
+def _real_source(r: dict, bad: set[str], white: bool) -> dict | None:
+    if not r.get("available") or not r.get("total") or r.get("beyond_index"):
+        return None
+    moves = r["moves"]
+    get = (lambda m, k: m[k]) if moves and isinstance(moves[0], dict) else (lambda m, k: getattr(m, k))
+
+    def score(ms) -> tuple[int, float | None]:
+        n = sum(get(m, "games") for m in ms)
+        if not n:
+            return 0, None
+        w = sum(get(m, "white") for m in ms)
+        bl = sum(get(m, "black") for m in ms)
+        d = sum(get(m, "draws") for m in ms)
+        mine = w if white else bl
+        return n, round((mine + d / 2) / n, 3)
+
+    fell, after_bad = score([m for m in moves if get(m, "uci") in bad])
+    _, overall = score(moves)
+    return {"total": r["total"], "fell": fell, "fell_pct": round(fell / r["total"], 3),
+            "score_after_bad": after_bad, "score_overall": overall}
+
+
+@app.get("/api/search/{job_id}/real")
+def search_real(job_id: str):
+    """Pułapki w prawdziwych partiach: ilu ludzi wpadło i jak potem kończyły się partie."""
+    res = _result(job_id)
+    p = res["params"]
+    st = explorer_mod.shared()
+    white = p["color"] == "white"
+    out = []
+    for t in res.get("traps") or []:
+        b = chess.Board(t["fen"])
+        bad = {d["uci"] for d in t.get("bad") or []}
+        row = {"local": None, "lichess": None}
+        if p.get("use_local_db", True) and st.local.available:
+            row["local"] = _real_source(st.local.query(b, p["elo_min"], p["elo_max"]), bad, white)
+        if p.get("use_lichess", True) and st.lichess.enabled:
+            row["lichess"] = _real_source(st.lichess_query(b, p["elo_min"], p["elo_max"], p.get("speeds"),
+                                                           p.get("lichess_source", "players")), bad, white)
+        out.append(row)
+    return {"traps": out, "lichess_source": p.get("lichess_source", "players"),
+            "lichess_error": st.lichess.error}
+
+
+# ------------------------------------------------------------------ gwiazdki i notatki
+
+MARKS_FILE = DATA_DIR / "marks.json"
+
+
+def _marks_all() -> dict:
+    try:
+        return json.loads(MARKS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+@app.get("/api/search/{job_id}/marks")
+def marks_get(job_id: str):
+    return _marks_all().get(job_id, {})
+
+
+class MarkReq(BaseModel):
+    key: str
+    star: bool | None = None
+    note: str | None = None
+
+
+@app.post("/api/search/{job_id}/marks")
+def marks_set(job_id: str, req: MarkReq):
+    allm = _marks_all()
+    mine = allm.setdefault(job_id, {})
+    m = mine.setdefault(req.key, {})
+    if req.star is not None:
+        m["star"] = req.star
+    if req.note is not None:
+        m["note"] = req.note.strip()[:2000]
+    if not m.get("star") and not m.get("note"):
+        mine.pop(req.key, None)
+    if not mine:
+        allm.pop(job_id, None)
+    DATA_DIR.mkdir(exist_ok=True)
+    tmp = MARKS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(allm, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(MARKS_FILE)
+    return mine
+
+
+# ------------------------------------------------------------------ eksport rozdziałów / studium Lichess
+
+class ExportReq(BaseModel):
+    kind: str = "traps"                 # traps | hard | nov
+    groups: list[dict]                  # [{"name": str, "items": [indeksy]}]
+    prefix: dict | None = None          # {"start_fen", "moves"} - droga do pozycji wyszukiwania
+    notes: dict[str, str] | None = None  # {indeks: notatka}
+    study: str | None = None            # adres/ID istniejącego studium; puste = nowe studium
+    new_name: str | None = None
+    visibility: str = "private"
+
+
+def _chapters(job_id: str, req: ExportReq) -> list[dict]:
+    if req.kind not in ("traps", "hard", "nov"):
+        raise HTTPException(400, "Zły rodzaj eksportu")
+    notes = {int(k): v for k, v in (req.notes or {}).items() if v}
+    return study_mod.build_chapters(_result(job_id), req.kind, req.groups, req.prefix, notes)
+
+
+@app.post("/api/search/{job_id}/chapters_pgn", response_class=PlainTextResponse)
+def chapters_pgn(job_id: str, req: ExportReq):
+    return "\n\n".join(c["pgn"] for c in _chapters(job_id, req))
+
+
+@app.get("/api/lichess/token")
+def lichess_token():
+    token = explorer_mod.shared().lichess.token
+    try:
+        info = study_mod.token_info(token)
+    except study_mod.StudyError as exc:
+        return {"valid": None, "error": str(exc), "create_url": study_mod.TOKEN_URL}
+    return {**info, "create_url": study_mod.TOKEN_URL}
+
+
+@app.post("/api/search/{job_id}/lichess_study")
+def lichess_study(job_id: str, req: ExportReq):
+    chapters = _chapters(job_id, req)
+    color = _result(job_id)["params"]["color"]
+    if req.visibility not in ("private", "unlisted", "public"):
+        req.visibility = "private"
+    try:
+        return study_mod.export_to_lichess(explorer_mod.shared().lichess.token, chapters, color,
+                                           req.study or None, req.new_name, req.visibility)
+    except study_mod.StudyError as exc:
+        raise HTTPException(400, str(exc))
 
 
 # ------------------------------------------------------------------ status/ustawienia
