@@ -132,14 +132,43 @@
 </dialog>
 
 <dialog id="dlg-settings">
-  <form method="dialog">
+  <form method="dialog" class="settings">
     <h3>Ustawienia</h3>
-    <label>Token Lichess (lichess.org/account/oauth/token)
-      <input id="set-token" type="password" placeholder="lip_…">
-    </label>
-    <p class="muted small">Token zapisywany jest lokalnie w config.local.json (nie trafia do gita).</p>
-    <div id="set-info" class="small muted"></div>
-    <div class="row"><button value="cancel">Zamknij</button><button id="set-save" value="ok" class="primary">Zapisz</button></div>
+
+    <section>
+      <h4>Silnik</h4>
+      <div id="set-engine" class="setbox muted small">…</div>
+      <div class="row left">
+        <button type="button" id="btn-pick-engine">Wybierz silnik…</button>
+      </div>
+      <p class="muted small">Dowolny silnik UCI (np. Stockfish ze stockfishchess.org). Każdy silnik ma osobną pamięć ocen.</p>
+    </section>
+
+    <section>
+      <h4>Baza partii</h4>
+      <div id="set-db" class="setbox muted small">…</div>
+      <div class="progress hidden" id="set-db-progress"><div></div></div>
+      <div class="row left">
+        <button type="button" id="btn-pick-db">Wybierz bazę (PGN)…</button>
+        <button type="button" id="btn-db-build" class="hidden">Zbuduj indeks</button>
+        <button type="button" id="btn-db-cancel" class="danger hidden">Przerwij indeksowanie</button>
+        <button type="button" id="btn-db-clear" class="ghost hidden">Bez bazy</button>
+      </div>
+      <p class="muted small">Po wybraniu nowej bazy indeks buduje się sam w tle (przy ~17 mln partii około 2 godzin; można przerwać
+        i później wznowić). W tym czasie aplikacja działa normalnie, tylko bez statystyk z tej bazy.
+        Indeksy wcześniej używanych baz są zachowywane.</p>
+    </section>
+
+    <section>
+      <h4>Lichess</h4>
+      <label>Token (lichess.org/account/oauth/token)
+        <input id="set-token" type="password" placeholder="lip_… (zostaw puste, żeby nie zmieniać)">
+      </label>
+      <div id="set-info" class="small muted"></div>
+    </section>
+
+    <div id="set-msg" class="small"></div>
+    <div class="row"><button value="cancel">Zamknij</button><button id="set-save" value="ok" class="primary">Zapisz token</button></div>
   </form>
 </dialog>
 

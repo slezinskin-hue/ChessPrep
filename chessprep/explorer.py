@@ -158,6 +158,12 @@ class Stats:
     def reload_local(self) -> None:
         self.local = GameIndex()
 
+    def release_local(self) -> None:
+        """Zamyka zmapowane pliki indeksu (np. przed jego przebudową)."""
+        import gc
+        self.local = GameIndex("__brak_indeksu__")
+        gc.collect()
+
     def local_query(self, board: chess.Board, elo_min: int, elo_max: int) -> dict:
         r = self.local.query(board, elo_min, elo_max)
         r["moves"] = [m.as_dict() for m in r["moves"]]

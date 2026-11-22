@@ -69,31 +69,26 @@ python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
 ```
 
-Zasoby, które **nie są w repozytorium** (są w `.gitignore`):
+Zasoby, które **nie są w repozytorium**, wskazujesz w aplikacji (⚙ Ustawienia):
 
-1. **Stockfish**: pobierz z <https://stockfishchess.org/download/> i rozpakuj do
-   `stockfish/` (domyślna ścieżka to `stockfish/stockfish-windows-x86-64-universal.exe`;
-   inną możesz ustawić w `config.local.json`).
-2. **Baza partii PGN** (opcjonalna): domyślnie `games/TeraBaza.pgn`.
+1. **Silnik**: przycisk „Wybierz silnik…”. Pasuje dowolny silnik UCI, np. Stockfish
+   ze <https://stockfishchess.org/download/>. Jeśli nic nie wybierzesz, aplikacja sama
+   użyje pierwszego pliku `stockfish*.exe` z folderu `stockfish/`. Każdy silnik ma
+   osobną pamięć ocen.
+2. **Baza partii** (opcjonalna): przycisk „Wybierz bazę (PGN)…”. Po wybraniu nowej
+   bazy jej indeks buduje się sam w tle, z paskiem postępu. Można to przerwać i
+   później wznowić. Przy ~17 mln partii trwa to około 2 godzin. Indeksy wcześniej
+   używanych baz zostają w `data/indexes/`, więc powrót do nich jest natychmiastowy.
 3. **Model Maia-2**: pobiera się sam przy pierwszym użyciu do `models/maia2/`.
 4. **Token Lichess** (opcjonalny, darmowy): <https://lichess.org/account/oauth/token>,
    bez zaznaczania uprawnień.
 
-Ustawienia lokalne trzymaj w `config.local.json` (wzór: `config.example.json`).
-Token można też wpisać w aplikacji (⚙).
+Ustawienia zapisują się lokalnie w `config.local.json` (wzór: `config.example.json`).
 
-### Indeks bazy partii
-
-Jednorazowo, przy ~17 mln partii trwa to około 2 godzin. Można przerwać i
-wznowić tą samą komendą.
+### Indeks z wiersza poleceń (opcjonalnie)
 
 ```powershell
-.venv\Scripts\python -m chessprep.dbindex build --workers 3
-```
-
-Sprawdzenie indeksu:
-
-```powershell
+.venv\Scripts\python -m chessprep.dbindex build --pgn games\MojaBaza.pgn
 .venv\Scripts\python -m chessprep.dbindex query e4 c5 Nf3 --elo-min 1600 --elo-max 2000
 ```
 

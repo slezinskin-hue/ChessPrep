@@ -567,20 +567,89 @@ async function loadSaved(selectId) {
 
 // ------------------------------------------------------------------ status
 
+function fileName(p) { return p ? p.split(/[\\/]/).pop() : ""; }
+
+function dbLabel(db, available) {
+  const b = db.building || {};
+  if (b.running) return `baza: indeksowanie ${b.pct ?? 0}%${b.eta_min != null ? `, zostało ~${b.eta_min} min` : ""}`;
+  if (!db.pgn) return "baza: nie wybrano";
+  if (!db.exists) return "baza: brak pliku";
+  if (db.index && available) return `baza: ${(db.index.games || 0).toLocaleString("pl")} partii`;
+  return "baza: brak indeksu";
+}
+
+let statusTimer = null;
+let lastStatus = null;
+
 async function loadStatus() {
   try {
     const s = await api("/api/status");
-    const idx = s.index.available
-      ? `baza: ${(s.index.meta.games || 0).toLocaleString("pl")} partii`
-      : `baza: indeksowanie… ${s.index.log ? s.index.log.replace(/.*\|\s*(\d+\/\d+).*ETA (\d+ min).*/, "$1, zostało ~$2") : ""}`;
+    lastStatus = s;
+    const db = s.database;
+    const dbOk = db.index && s.index_available;
     $("#status").innerHTML = [
-      `<span class="${s.engine_path_ok ? "ok" : "bad"}">${s.engine !== "?" ? s.engine : "Stockfish"}</span>`,
-      `<span class="${s.index.available ? "ok" : "warn"}">${idx}</span>`,
+      `<span class="${s.engine_path_ok ? "ok" : "bad"}" title="${s.engine_path || ""}">${s.engine_path_ok ? s.engine : "brak silnika"}</span>`,
+      `<span class="${dbOk ? "ok" : db.building.running ? "warn" : db.pgn ? "bad" : "warn"}" title="${db.pgn || ""}">${dbLabel(db, s.index_available)}</span>`,
       `<span class="${s.maia_error ? "bad" : "ok"}">Maia-2${s.maia_loaded ? "" : " (ładuje się przy 1. użyciu)"}</span>`,
       `<span class="${!s.lichess_token ? "bad" : s.lichess_error ? "warn" : "ok"}">Lichess${s.lichess_token ? "" : ": brak tokenu"}</span>`,
     ].join("");
-    $("#set-info").textContent = s.lichess_error ? "Ostatni błąd Lichess: " + s.lichess_error : "";
-  } catch (_) {}
+    $("#set-info").textContent = s.lichess_error ? "Ostatni błąd Lichess: " + s.lichess_error : (s.lichess_token ? "Token ustawiony." : "Brak tokenu - statystyki Lichess wyłączone.");
+    renderSettings(s);
+    // częstsze odświeżanie, gdy coś się dzieje w tle
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(loadStatus, db.building.running || $("#dlg-settings").open ? 2500 : 15000);
+    if (!s.engine_path_ok && !loadStatus.prompted) { loadStatus.prompted = true; openSettings(); }
+  } catch (_) {
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(loadStatus, 5000);
+  }
+}
+
+function renderSettings(s) {
+  const eng = $("#set-engine");
+  eng.innerHTML = s.engine_path_ok
+    ? `<b>${s.engine}</b><br><span class="path">${s.engine_path}</span>`
+    : `<span class="badtxt">Nie znaleziono silnika.</span> Pobierz Stockfisha ze stockfishchess.org i wskaż plik .exe.`;
+  const db = s.database;
+  const b = db.building || {};
+  let html;
+  if (!db.pgn) html = "Nie wybrano bazy - statystyki tylko z Lichess.";
+  else {
+    html = `<b>${fileName(db.pgn)}</b>${db.size_mb != null ? ` (${db.size_mb.toLocaleString("pl")} MB)` : ""}<br><span class="path">${db.pgn}</span><br>`;
+    if (!db.exists) html += '<span class="badtxt">Plik nie istnieje.</span>';
+    else if (b.running) html += `Indeksowanie: ${b.phase || "start"} – ${b.pct ?? 0}%${b.eta_min != null ? `, zostało ~${b.eta_min} min` : ""}`;
+    else if (db.index) html += `Indeks gotowy: ${(db.index.games || 0).toLocaleString("pl")} partii (zbudowany ${db.index.built || "?"}).`;
+    else html += db.resumable ? "Indeksowanie przerwane – można je wznowić." : "Brak indeksu.";
+    if (db.error) html += `<br><span class="badtxt">${db.error}</span>`;
+  }
+  $("#set-db").innerHTML = html;
+  const prog = $("#set-db-progress");
+  prog.classList.toggle("hidden", !b.running);
+  prog.firstElementChild.style.width = (b.pct || 0) + "%";
+  $("#btn-db-build").classList.toggle("hidden", !(db.pgn && db.exists && !db.index && !b.running));
+  $("#btn-db-build").textContent = db.resumable ? "Wznów indeksowanie" : "Zbuduj indeks";
+  $("#btn-db-cancel").classList.toggle("hidden", !b.running);
+  $("#btn-db-clear").classList.toggle("hidden", !db.pgn || b.running);
+  $("#btn-pick-db").disabled = !!b.running;
+  $("#btn-pick-engine").disabled = !!s.search_running;
+}
+
+function openSettings() {
+  $("#set-token").value = "";
+  $("#set-msg").textContent = "";
+  if (!$("#dlg-settings").open) $("#dlg-settings").showModal();
+  loadStatus();
+}
+
+async function settingsAction(fn) {
+  $("#set-msg").textContent = "";
+  try { await fn(); } catch (e) { $("#set-msg").innerHTML = `<span class="badtxt">${e.message}</span>`; }
+  await loadStatus();
+}
+
+async function pickFile(kind) {
+  const r = await api("/api/pick_file", { method: "POST", body: { kind } });
+  return r.path;
 }
 
 // ------------------------------------------------------------------ zdarzenia
@@ -609,7 +678,25 @@ $("#paste-ok").onclick = async (e) => {
     refresh();
   } catch (err) { e.preventDefault(); alert(err.message); }
 };
-$("#btn-settings").onclick = () => { $("#set-token").value = ""; loadStatus(); $("#dlg-settings").showModal(); };
+$("#btn-settings").onclick = openSettings;
+$("#btn-pick-engine").onclick = () => settingsAction(async () => {
+  const p = await pickFile("engine");
+  if (!p) return;
+  $("#set-msg").textContent = "Sprawdzam silnik…";
+  const r = await api("/api/engine", { method: "POST", body: { path: p } });
+  $("#set-msg").textContent = `Ustawiono silnik: ${r.name}`;
+  if ($("#auto-engine").checked) loadEngine(curFen());
+});
+$("#btn-pick-db").onclick = () => settingsAction(async () => {
+  const p = await pickFile("pgn");
+  if (!p) return;
+  const r = await api("/api/database", { method: "POST", body: { path: p } });
+  $("#set-msg").textContent = r.index ? "Baza ustawiona - indeks już był gotowy." : "Baza ustawiona - indeksowanie ruszyło w tle.";
+  loadStats(curFen());
+});
+$("#btn-db-build").onclick = () => settingsAction(() => api("/api/database/build", { method: "POST" }));
+$("#btn-db-cancel").onclick = () => settingsAction(() => api("/api/database/cancel", { method: "POST" }));
+$("#btn-db-clear").onclick = () => settingsAction(async () => { await api("/api/database/clear", { method: "POST" }); loadStats(curFen()); });
 $("#set-save").onclick = async () => {
   const t = $("#set-token").value.trim();
   if (t) await api("/api/settings", { method: "POST", body: { lichess_token: t } });
@@ -652,4 +739,4 @@ updateEvalLabel();
 refresh();
 loadStatus();
 loadSaved();
-setInterval(loadStatus, 15000);
+

@@ -319,12 +319,30 @@ def _merge(index_dir: Path, tmp_dir: Path, n_chunks: int) -> dict:
     return {"games": total_games, "entries": entries}
 
 
-def build(workers: int = 3, max_plies: int | None = None, keep_tmp: bool = False) -> None:
-    pgn = CONFIG["pgn_path"]
+def build(workers: int = 3, max_plies: int | None = None, keep_tmp: bool = False,
+          pgn: str | None = None, index_dir: str | None = None) -> None:
+    pgn = pgn or CONFIG["pgn_path"]
     max_plies = max_plies or CONFIG["index_max_plies"]
-    index_dir = Path(CONFIG["index_dir"])
+    if index_dir is None:
+        from .databases import index_dir_for
+        index_dir = index_dir_for(pgn)
+    index_dir = Path(index_dir)
     tmp_dir = index_dir / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
+    # wznawiamy tylko pracę nad tym samym plikiem (ta sama ścieżka i rozmiar)
+    source = {"pgn": os.path.abspath(pgn), "size": os.path.getsize(pgn), "max_plies": max_plies}
+    src_file = tmp_dir / "source.json"
+    if src_file.exists():
+        try:
+            old = json.loads(src_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            old = {}
+        if old != source:
+            for f in tmp_dir.glob("chunk_*"):
+                f.unlink()
+    src_file.write_text(json.dumps(source), encoding="utf-8")
+    (index_dir / "meta.json").unlink(missing_ok=True)  # do końca budowy indeks jest nieważny
+    print(f"Indeks: {pgn} -> {index_dir}", flush=True)
 
     chunks = _chunks(pgn)
     tasks = [(i, pgn, s, e, max_plies, str(tmp_dir)) for i, (s, e) in enumerate(chunks)]
@@ -354,6 +372,7 @@ def build(workers: int = 3, max_plies: int | None = None, keep_tmp: bool = False
         "max_plies": max_plies,
         "key_method": KEY_METHOD,
         "pgn": os.path.basename(pgn),
+        "pgn_path": os.path.abspath(pgn),
         "pgn_size": os.path.getsize(pgn),
         "built": time.strftime("%Y-%m-%d %H:%M"),
         **stats,
@@ -361,7 +380,7 @@ def build(workers: int = 3, max_plies: int | None = None, keep_tmp: bool = False
     (index_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"Gotowe: {stats['games']:,} partii, {stats['entries']:,} wpisów", flush=True)
     if not keep_tmp:
-        for f in tmp_dir.glob("chunk_*"):
+        for f in tmp_dir.iterdir():
             f.unlink()
         tmp_dir.rmdir()
 
@@ -384,7 +403,10 @@ class GameIndex:
     """Odczyt gotowego indeksu (pliki zmapowane w pamięci)."""
 
     def __init__(self, index_dir: str | None = None):
-        self.dir = Path(index_dir or CONFIG["index_dir"])
+        if index_dir is None:
+            from .databases import active_index_dir
+            index_dir = active_index_dir()
+        self.dir = Path(index_dir) if index_dir else Path("__brak_indeksu__")
         meta = self.dir / "meta.json"
         self.available = meta.exists()
         if not self.available:
@@ -464,6 +486,8 @@ def main(argv=None) -> None:
     b.add_argument("--workers", type=int, default=3)
     b.add_argument("--max-plies", type=int, default=None)
     b.add_argument("--keep-tmp", action="store_true")
+    b.add_argument("--pgn", help="plik PGN (domyślnie z konfiguracji)")
+    b.add_argument("--index-dir", help="katalog indeksu (domyślnie wyznaczany z nazwy pliku)")
     sub.add_parser("bench")
     q = sub.add_parser("query")
     q.add_argument("moves", nargs="*", help="ruchy w notacji SAN lub UCI od pozycji startowej")
@@ -471,7 +495,7 @@ def main(argv=None) -> None:
     q.add_argument("--elo-max", type=int)
     args = ap.parse_args(argv)
     if args.cmd == "build":
-        build(args.workers, args.max_plies, args.keep_tmp)
+        build(args.workers, args.max_plies, args.keep_tmp, args.pgn, args.index_dir)
     elif args.cmd == "bench":
         _bench()
     elif args.cmd == "query":

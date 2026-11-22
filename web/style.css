@@ -130,3 +130,11 @@ dialog:has(.promo) { min-width: 0; }
 .tag.soft { background: #d9a44133; color: #f0c674; }
 .tag.tn { background: #5b9bd533; color: #9cc8f0; }
 [data-sub="1"] { cursor: pointer; } [data-sub="1"]:hover { text-decoration: underline; }
+
+.settings { min-width: 560px; max-width: 680px; }
+.settings section { border-top: 1px solid #ffffff14; padding: 8px 0 4px; }
+.settings h4 { margin: 0 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.setbox { background: #0003; border-radius: 4px; padding: 6px 8px; margin-bottom: 6px; line-height: 1.5; color: var(--text); }
+.setbox .path { color: var(--muted); font-family: Consolas, monospace; font-size: 11px; word-break: break-all; }
+.badtxt { color: #ff8a7f; }
+.row.left { justify-content: flex-start; flex-wrap: wrap; }

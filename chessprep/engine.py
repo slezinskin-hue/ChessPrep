@@ -7,17 +7,22 @@ strony na ruchu - tu to ujednolicamy). Oprócz centypionów bierzemy też WDL
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import chess
 import chess.engine
 
-from .config import CONFIG, DATA_DIR
+from . import config as config_mod
+from .config import CONFIG, DATA_DIR, ROOT
 
 MATE_CP = 100_000
+# bez migającego okna konsoli silnika na Windows (gdy aplikacja działa bez konsoli)
+_NO_WINDOW = {"creationflags": 0x08000000} if __import__("os").name == "nt" else {}
 
 
 @dataclass
@@ -81,21 +86,98 @@ class EvalCache:
             self.db.commit()
 
 
+class EngineMissing(RuntimeError):
+    pass
+
+
+def resolve_engine_path() -> str | None:
+    """Ścieżka silnika: z konfiguracji, a gdy jej brak - pierwszy stockfish*.exe w stockfish/."""
+    p = CONFIG.get("stockfish_path") or ""
+    if p and Path(p).is_file():
+        return p
+    for folder, pattern in ((ROOT / "stockfish", "stockfish*"), (ROOT / "engines", "*")):
+        if folder.is_dir():
+            for cand in sorted(folder.rglob(pattern)):
+                if cand.is_file() and cand.suffix.lower() in (".exe", "") and "src" not in cand.parts:
+                    return str(cand)
+    return None
+
+
+def engine_key(path: str) -> str:
+    """Identyfikator silnika do pamięci ocen (inna wersja silnika = osobna pamięć)."""
+    st = Path(path).stat()
+    raw = f"{Path(path).resolve()}|{st.st_size}|{int(st.st_mtime)}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
+def _cache_for(path: str | None) -> "EvalCache":
+    folder = DATA_DIR / "evals"
+    folder.mkdir(parents=True, exist_ok=True)
+    if not path:
+        return EvalCache(folder / "brak-silnika.sqlite")
+    target = folder / f"{engine_key(path)}.sqlite"
+    legacy = DATA_DIR / "evals.sqlite"  # pamięć sprzed wyboru silnika = domyślny Stockfish
+    default = ROOT / "stockfish" / "stockfish-windows-x86-64-universal.exe"
+    if not target.exists() and legacy.exists() and Path(path).resolve() == default.resolve():
+        try:  # kopia przez API SQLite - działa także, gdy stary plik jest otwarty
+            src = sqlite3.connect(legacy)
+            dst = sqlite3.connect(target)
+            src.backup(dst)
+            dst.close()
+            src.close()
+        except sqlite3.Error:
+            pass
+    return EvalCache(target)
+
+
+def probe(path: str, timeout: float = 20.0) -> str:
+    """Sprawdza, czy plik jest silnikiem UCI. Zwraca jego nazwę albo rzuca wyjątek."""
+    if not Path(path).is_file():
+        raise EngineMissing(f"Nie ma pliku: {path}")
+    result: dict = {}
+
+    def run():
+        try:
+            eng = chess.engine.SimpleEngine.popen_uci(path, timeout=timeout, **_NO_WINDOW)
+            result["name"] = eng.id.get("name", Path(path).stem)
+            eng.quit()
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = exc
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout + 5)
+    if "name" in result:
+        return result["name"]
+    err = result.get("error")
+    raise EngineMissing(f"To nie wygląda na silnik UCI ({type(err).__name__ if err else 'brak odpowiedzi'})")
+
+
 class Engine:
     def __init__(self, path: str | None = None, threads: int | None = None, hash_mb: int | None = None):
-        self.path = path or CONFIG["stockfish_path"]
+        self.path = path or resolve_engine_path()
         self.threads = threads or CONFIG["engine_threads"]
         self.hash_mb = hash_mb or CONFIG["engine_hash_mb"]
         self._lock = threading.Lock()
         self._engine: chess.engine.SimpleEngine | None = None
-        self.cache = EvalCache()
-        self.name = "?"
+        self.cache = _cache_for(self.path)
+        self.name = Path(self.path).stem if self.path else "brak silnika"
 
     def _ensure(self) -> chess.engine.SimpleEngine:
         if self._engine is None:
-            self._engine = chess.engine.SimpleEngine.popen_uci(self.path)
-            self._engine.configure({"Threads": self.threads, "Hash": self.hash_mb, "UCI_ShowWDL": True})
-            self.name = self._engine.id.get("name", "?")
+            if not self.path:
+                raise EngineMissing("Nie wybrano silnika - wybierz go w ustawieniach (⚙).")
+            self._engine = chess.engine.SimpleEngine.popen_uci(self.path, **_NO_WINDOW)
+            opts = self._engine.options
+            cfg = {}
+            if "Threads" in opts:
+                cfg["Threads"] = self.threads
+            if "Hash" in opts:
+                cfg["Hash"] = self.hash_mb
+            if "UCI_ShowWDL" in opts:
+                cfg["UCI_ShowWDL"] = True
+            self._engine.configure(cfg)
+            self.name = self._engine.id.get("name", self.name)
         return self._engine
 
     def close(self) -> None:
@@ -169,3 +251,17 @@ def shared() -> Engine:
     if _shared is None:
         _shared = Engine()
     return _shared
+
+
+def set_engine(path: str) -> str:
+    """Sprawdza i ustawia nowy silnik (zapisuje w config.local.json). Zwraca jego nazwę."""
+    global _shared
+    name = probe(path)
+    CONFIG["stockfish_path"] = path
+    config_mod.save_local({"stockfish_path": path})
+    old = _shared
+    _shared = Engine(path)
+    _shared.name = name
+    if old is not None:
+        old.close()
+    return name

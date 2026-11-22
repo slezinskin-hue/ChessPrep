@@ -8,13 +8,14 @@ from pathlib import Path
 
 import chess
 import chess.pgn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import __version__
 from . import config as config_mod
+from . import databases as db_mod
 from . import engine as engine_mod
 from . import explorer as explorer_mod
 from . import human as human_mod
@@ -23,6 +24,16 @@ from .search import JobManager, SearchParams
 
 app = FastAPI(title="ChessPrep", version=__version__)
 jobs = JobManager()
+
+# indeks bazy: po zbudowaniu/zmianie przeładuj statystyki, przed budową zwolnij pliki
+_idx = db_mod.shared()
+_idx.on_ready = lambda: explorer_mod.shared().reload_local()
+_idx.on_release = lambda: explorer_mod.shared().release_local()
+
+
+@app.exception_handler(engine_mod.EngineMissing)
+def _engine_missing(_: Request, exc: engine_mod.EngineMissing):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 def _board(fen: str) -> chess.Board:
@@ -280,31 +291,32 @@ def search_pgn(job_id: str):
 
 # ------------------------------------------------------------------ status/ustawienia
 
-def _index_progress() -> dict:
-    log = DATA_DIR / "index_build.log"
-    idx = explorer_mod.shared().local
-    out = {"available": idx.available, "meta": getattr(idx, "meta", None)}
-    if not idx.available and log.exists():
-        lines = log.read_text(encoding="utf-8", errors="replace").strip().splitlines()
-        out["log"] = lines[-1] if lines else ""
-    return out
+def _search_running() -> bool:
+    return any(j.status in ("queued", "running") for j in jobs.jobs.values())
 
 
 @app.get("/api/status")
 def status():
     st = explorer_mod.shared()
-    if not st.local.available and (Path(CONFIG["index_dir"]) / "meta.json").exists():
-        st.reload_local()
+    idx = db_mod.shared()
+    if not st.local.available and not idx.building:
+        d = db_mod.active_index_dir()
+        if d is not None and (d / "meta.json").exists():
+            st.reload_local()
     maia = human_mod.shared()
+    eng = engine_mod.shared()
     return {
         "version": __version__,
-        "engine": engine_mod.shared().name,
-        "engine_path_ok": Path(CONFIG["stockfish_path"]).exists(),
-        "index": _index_progress(),
+        "engine": eng.name,
+        "engine_path": eng.path,
+        "engine_path_ok": bool(eng.path and Path(eng.path).is_file()),
+        "database": idx.status(),
+        "index_available": st.local.available,
         "lichess_token": bool(st.lichess.token),
         "lichess_error": st.lichess.error,
         "maia_loaded": maia._model is not None,
         "maia_error": maia.error,
+        "search_running": _search_running(),
     }
 
 
@@ -320,6 +332,99 @@ def settings(req: SettingsReq):
         CONFIG["lichess_token"] = token
         explorer_mod.shared().lichess.token = token
     return {"ok": True}
+
+
+_FILE_TYPES = {
+    "engine": (("Silnik szachowy (*.exe)", "*.exe"), ("Wszystkie pliki (*.*)", "*.*")),
+    "pgn": (("Partie PGN (*.pgn)", "*.pgn"), ("Wszystkie pliki (*.*)", "*.*")),
+}
+
+
+def _pick_file(kind: str) -> str | None:
+    """Systemowe okno wyboru pliku: okno aplikacji (pywebview) albo tkinter."""
+    types = _FILE_TYPES[kind]
+    try:
+        import webview
+        if webview.windows:
+            res = webview.windows[0].create_file_dialog(
+                webview.FileDialog.OPEN, file_types=tuple(f"{d.split(' (')[0]} ({p})" for d, p in types))
+            if not res:
+                return None
+            return res[0] if isinstance(res, (list, tuple)) else str(res)
+    except ImportError:
+        pass
+    import tkinter as tk
+    from tkinter import filedialog
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    title = "Wybierz silnik szachowy" if kind == "engine" else "Wybierz bazę partii (PGN)"
+    path = filedialog.askopenfilename(title=title, filetypes=[(d, p) for d, p in types], parent=root)
+    root.destroy()
+    return path or None
+
+
+class PickReq(BaseModel):
+    kind: str
+
+
+@app.post("/api/pick_file")
+def pick_file(req: PickReq):
+    if req.kind not in _FILE_TYPES:
+        raise HTTPException(400, "Nieznany rodzaj pliku")
+    return {"path": _pick_file(req.kind)}
+
+
+class PathReq(BaseModel):
+    path: str
+
+
+@app.post("/api/engine")
+def set_engine(req: PathReq):
+    if _search_running():
+        raise HTTPException(409, "Trwa wyszukiwanie - poczekaj albo je przerwij.")
+    try:
+        name = engine_mod.set_engine(req.path.strip().strip('"'))
+    except engine_mod.EngineMissing as exc:
+        raise HTTPException(400, str(exc))
+    return {"name": name, "path": req.path}
+
+
+@app.post("/api/database")
+def set_database(req: PathReq):
+    if _search_running():
+        raise HTTPException(409, "Trwa wyszukiwanie - poczekaj albo je przerwij.")
+    path = req.path.strip().strip('"')
+    try:
+        return db_mod.shared().select(path)
+    except FileNotFoundError:
+        raise HTTPException(400, f"Nie ma pliku: {path}")
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+
+
+@app.post("/api/database/build")
+def database_build():
+    try:
+        db_mod.shared().start_build()
+    except FileNotFoundError as exc:
+        raise HTTPException(400, f"Nie ma pliku bazy: {exc}")
+    return db_mod.shared().status()
+
+
+@app.post("/api/database/cancel")
+def database_cancel():
+    db_mod.shared().cancel()
+    return db_mod.shared().status()
+
+
+@app.post("/api/database/clear")
+def database_clear():
+    try:
+        db_mod.shared().clear()
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+    return db_mod.shared().status()
 
 
 # ------------------------------------------------------------------ pliki strony
