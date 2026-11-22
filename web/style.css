@@ -143,3 +143,6 @@ dialog:has(.promo) { min-width: 0; }
 .moment.cur { background: #5b9bd533; outline: 1px solid var(--accent); }
 #tab-tree summary.cur { background: #5b9bd540; border-radius: 3px; }
 .trap.sel, .hline.sel, .nov.sel { box-shadow: 0 0 0 1px var(--accent), 0 0 12px #5b9bd555; }
+.card h2 .right { min-width: 0; text-transform: none; letter-spacing: 0; }
+#saved { min-width: 0; max-width: 100%; flex: 1 1 auto; text-overflow: ellipsis; }
+#btn-pgn, #btn-close-res { flex: none; white-space: nowrap; }

@@ -1,6 +1,6 @@
 """ChessPrep - szukanie praktycznie trudnych wariantów debiutowych."""
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 try:
     # Używaj magazynu certyfikatów systemu (np. gdy antywirus skanuje HTTPS).

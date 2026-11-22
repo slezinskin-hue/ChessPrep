@@ -431,7 +431,17 @@ def database_clear():
 
 @app.get("/")
 def index():
-    return FileResponse(WEB_DIR / "index.html")
+    return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
-app.mount("/", StaticFiles(directory=WEB_DIR), name="web")
+class _NoCacheStatic(StaticFiles):
+    """Po aktualizacji programu okno ma od razu użyć nowych plików JS/CSS
+    (no-cache = przeglądarka zawsze pyta serwer; niezmienione pliki i tak idą jako 304)."""
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
+app.mount("/", _NoCacheStatic(directory=WEB_DIR), name="web")

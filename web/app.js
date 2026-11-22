@@ -325,6 +325,23 @@ function showResult(res) {
   renderHard(res);
   renderNovelties(res);
   renderTree(res);
+  $("#btn-close-res").classList.remove("hidden");
+  syncResults();
+}
+
+// Zamknięcie wyników (np. otwartego zapisanego wyszukiwania) - szachownica zostaje,
+// można dalej ustawiać pozycję i szukać od nowa.
+function closeResult() {
+  state.result = null;
+  $('.tab[data-tab="traps"]').textContent = "Pułapki";
+  $('.tab[data-tab="hard"]').textContent = "Trudne linie";
+  $('.tab[data-tab="nov"]').textContent = "Nowinki";
+  for (const t of ["traps", "hard", "nov", "tree"]) $("#tab-" + t).innerHTML = "";
+  $("#saved").value = "";
+  $("#btn-close-res").classList.add("hidden");
+  if (!state.job) $("#job").textContent = "";
+  state.arrows = [];
+  board.set({ arrows: [] });
   syncResults();
 }
 
@@ -801,9 +818,17 @@ $("#btn-search").onclick = startSearch;
 $("#btn-cancel").onclick = () => state.job && api(`/api/search/${state.job}/cancel`, { method: "POST" });
 $("#saved").onchange = async () => {
   const id = $("#saved").value;
-  if (!id) return;
+  if (!id) { closeResult(); return; }
   const r = await api("/api/search/" + id);
   if (r.result) showResult(r.result);
+};
+$("#btn-close-res").onclick = closeResult;
+$("#btn-new").onclick = () => {
+  state.startFen = START;
+  state.moves = [];
+  state.cursor = 0;
+  state.arrows = [];
+  refresh();
 };
 $("#btn-pgn").onclick = async () => {
   const id = (state.result && state.result.id) || $("#saved").value;
