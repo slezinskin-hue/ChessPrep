@@ -1,0 +1,10 @@
+chess>=1.11
+numpy>=2.0
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pywebview>=5.0
+requests>=2.32
+truststore>=0.10
+# Maia-2 (model ruchów ludzkich). Na Windows PyPI dostarcza wersję torch na CPU.
+torch>=2.3
+maia2>=0.11

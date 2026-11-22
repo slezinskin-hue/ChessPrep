@@ -1,0 +1,24 @@
+# Duże / lokalne zasoby użytkownika
+games/
+stockfish/
+engines/
+data/
+models/
+
+# Lokalna konfiguracja (token Lichess!)
+config.local.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# System / edytory
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/settings.local.json

@@ -1,0 +1,10 @@
+{
+  "lichess_token": "lip_TWOJ_TOKEN",
+  "stockfish_path": "stockfish/stockfish-windows-x86-64-universal.exe",
+  "pgn_path": "games/TeraBaza.pgn",
+  "engine_threads": 3,
+  "engine_hash_mb": 512,
+  "index_max_plies": 30,
+  "maia_type": "rapid",
+  "port": 8777
+}

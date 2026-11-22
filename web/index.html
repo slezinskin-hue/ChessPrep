@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>ChessPrep</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>ChessPrep</h1>
+  <div id="status" class="status"></div>
+  <button id="btn-settings" class="ghost" title="Ustawienia">⚙</button>
+</header>
+
+<main>
+  <!-- LEWA KOLUMNA: szachownica -->
+  <section class="col col-board">
+    <div id="board" class="board"></div>
+    <div class="board-tools">
+      <button id="btn-start" title="Pozycja początkowa">⏮</button>
+      <button id="btn-back" title="Cofnij (←)">◀</button>
+      <button id="btn-fwd" title="Do przodu (→)">▶</button>
+      <button id="btn-flip" title="Obróć szachownicę">⇅</button>
+      <button id="btn-paste" title="Wklej PGN / FEN">PGN/FEN</button>
+    </div>
+    <div id="moves" class="moves"></div>
+    <div class="fen-row"><input id="fen" spellcheck="false" readonly></div>
+  </section>
+
+  <!-- ŚRODKOWA: analiza pozycji -->
+  <section class="col col-info">
+    <div class="card">
+      <h2>Silnik <span id="eval-badge" class="badge"></span></h2>
+      <div id="engine-lines" class="lines muted">—</div>
+      <label class="inline"><input type="checkbox" id="auto-engine" checked> analizuj automatycznie</label>
+    </div>
+    <div class="card">
+      <h2>Ruchy ludzi <small id="stats-range"></small></h2>
+      <table class="stats" id="stats-table"></table>
+      <div id="stats-note" class="muted small"></div>
+    </div>
+  </section>
+
+  <!-- PRAWA: wyszukiwanie -->
+  <section class="col col-search">
+    <div class="card">
+      <h2>Szukaj pułapek od tej pozycji</h2>
+      <div class="form">
+        <label>Gram
+          <select id="p-color"><option value="white">białymi</option><option value="black">czarnymi</option></select>
+        </label>
+        <label id="lbl-eval">Najgorsza akceptowana ocena
+          <input id="p-eval" type="number" step="0.1" value="-0.5">
+        </label>
+        <label>Ranking przeciwników
+          <span class="range"><input id="p-elo-min" type="number" step="100" value="1600"> –
+          <input id="p-elo-max" type="number" step="100" value="2000"></span>
+        </label>
+        <label>Głębokość wariantu (półruchy)
+          <input id="p-plies" type="number" min="2" max="30" value="12">
+        </label>
+        <details>
+          <summary>Zaawansowane</summary>
+          <label>Liczba analizowanych pozycji <input id="p-budget" type="number" min="10" max="2000" value="120"></label>
+          <label>Głębokość silnika <input id="p-depth" type="number" min="8" max="30" value="16"></label>
+          <label>Głębokość weryfikacji <input id="p-vdepth" type="number" min="10" max="34" value="21"></label>
+          <label>Maks. strata vs najlepszy ruch (pion) <input id="p-drop" type="number" step="0.1" value="1.2"></label>
+          <label>Moje kandydaty (MultiPV) <input id="p-cands" type="number" min="1" max="8" value="4"></label>
+          <label>Odpowiedzi przeciwnika (maks.) <input id="p-replies" type="number" min="1" max="8" value="4"></label>
+          <label>Pokrycie odpowiedzi przeciwnika <input id="p-cover" type="number" step="0.05" min="0.3" max="1" value="0.85"></label>
+          <label class="inline"><input type="checkbox" id="p-lichess" checked> statystyki Lichess</label>
+          <label class="inline"><input type="checkbox" id="p-local" checked> baza lokalna</label>
+          <label>Tempo (Lichess)
+            <span class="speeds">
+              <label class="inline"><input type="checkbox" value="bullet" class="p-speed"> bullet</label>
+              <label class="inline"><input type="checkbox" value="blitz" class="p-speed" checked> blitz</label>
+              <label class="inline"><input type="checkbox" value="rapid" class="p-speed" checked> rapid</label>
+              <label class="inline"><input type="checkbox" value="classical" class="p-speed" checked> klasyczne</label>
+            </span>
+          </label>
+        </details>
+        <div class="row">
+          <button id="btn-search" class="primary">Szukaj</button>
+          <button id="btn-cancel" class="danger hidden">Przerwij</button>
+        </div>
+        <div id="job" class="job muted small"></div>
+      </div>
+    </div>
+
+    <div class="card grow">
+      <h2>Wyniki
+        <span class="right">
+          <select id="saved"></select>
+          <button id="btn-pgn" class="ghost small" title="Eksport drzewa do PGN">PGN</button>
+        </span>
+      </h2>
+      <div class="tabs">
+        <button data-tab="traps" class="tab active">Pułapki</button>
+        <button data-tab="tree" class="tab">Drzewo</button>
+      </div>
+      <div id="tab-traps" class="tab-body"></div>
+      <div id="tab-tree" class="tab-body hidden"></div>
+    </div>
+  </section>
+</main>
+
+<dialog id="dlg-paste">
+  <form method="dialog">
+    <h3>Wklej PGN albo FEN</h3>
+    <textarea id="paste-text" rows="8"></textarea>
+    <div class="row"><button value="cancel">Anuluj</button><button id="paste-ok" value="ok" class="primary">Wczytaj</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-settings">
+  <form method="dialog">
+    <h3>Ustawienia</h3>
+    <label>Token Lichess (lichess.org/account/oauth/token)
+      <input id="set-token" type="password" placeholder="lip_…">
+    </label>
+    <p class="muted small">Token zapisywany jest lokalnie w config.local.json (nie trafia do gita).</p>
+    <div id="set-info" class="small muted"></div>
+    <div class="row"><button value="cancel">Zamknij</button><button id="set-save" value="ok" class="primary">Zapisz</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-promo">
+  <form method="dialog" class="promo">
+    <button value="q">♛</button><button value="r">♜</button><button value="b">♝</button><button value="n">♞</button>
+  </form>
+</dialog>
+
+<script src="board.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
