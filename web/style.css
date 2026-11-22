@@ -138,3 +138,8 @@ dialog:has(.promo) { min-width: 0; }
 .setbox .path { color: var(--muted); font-family: Consolas, monospace; font-size: 11px; word-break: break-all; }
 .badtxt { color: #ff8a7f; }
 .row.left { justify-content: flex-start; flex-wrap: wrap; }
+
+.tab.has-match::after { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #f0c674; margin-left: 6px; vertical-align: middle; }
+.moment.cur { background: #5b9bd533; outline: 1px solid var(--accent); }
+#tab-tree summary.cur { background: #5b9bd540; border-radius: 3px; }
+.trap.sel, .hline.sel, .nov.sel { box-shadow: 0 0 0 1px var(--accent), 0 0 12px #5b9bd555; }

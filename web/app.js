@@ -76,6 +76,7 @@ async function refresh({ analyse = true } = {}) {
     lastMove: last ? [last.slice(0, 2), last.slice(2, 4)] : null, check, arrows: state.arrows });
   $("#fen").value = fen;
   renderMoves();
+  syncResults();
   if (analyse) {
     loadStats(fen);
     if ($("#auto-engine").checked) loadEngine(fen);
@@ -324,6 +325,89 @@ function showResult(res) {
   renderHard(res);
   renderNovelties(res);
   renderTree(res);
+  syncResults();
+}
+
+// ------------------------------------------------------------------ pozycja na szachownicy <-> wyniki
+
+// klucz pozycji: układ, strona na ruchu, roszady, bicie w przelocie (bez liczników ruchów)
+function posKey(fen) { return fen.split(" ").slice(0, 4).join(" "); }
+
+// Gdy pozycja na szachownicy jest w wynikach (pułapka, moment trudnej linii, nowinka,
+// węzeł drzewa) - zaznacz te karty, przewiń do nich i pokaż strzałki jak po kliknięciu.
+function syncResults() {
+  const res = state.result;
+  // karta kliknięta przed chwilą ma pierwszeństwo, gdy kilka kart pasuje do pozycji
+  const prev = (sel) => { const e = $(sel); return e ? +e.dataset.i : -1; };
+  const prevHard = prev("#tab-hard .hline.sel"), prevNov = prev("#tab-nov .nov.sel");
+  const preferFirst = (arr, i) => (i >= 0 && i < arr.length ? [i, ...arr.keys()] : [...arr.keys()]);
+  $$(".trap.sel, .hline.sel, .nov.sel").forEach((e) => e.classList.remove("sel"));
+  $$(".moment.cur, #tab-tree summary.cur").forEach((e) => e.classList.remove("cur"));
+  $$(".tab").forEach((t) => t.classList.remove("has-match"));
+  state.matches = {};
+  if (!res) return;
+  const key = posKey(curFen());
+  const found = {};
+
+  const ti = (res.traps || []).findIndex((t) => posKey(t.fen) === key);
+  if (ti >= 0) {
+    const t = res.traps[ti];
+    found.traps = { el: $(`#tab-traps .trap[data-i="${ti}"]`), arrows: arrowsFor(t.good, t.bad) };
+  }
+  const hard = res.hard_lines || [];
+  preferFirst(hard, prevHard).some((i) => {
+    const h = hard[i];
+    const j = h.moments.findIndex((m) => posKey(m.fen) === key);
+    if (j < 0) return false;
+    const card = $(`#tab-hard .hline[data-i="${i}"]`);
+    const li = card && card.querySelector(`[data-sub="${j}"]`);
+    if (li) li.classList.add("cur");
+    found.hard = { el: card, focus: li || card, arrows: arrowsFor(h.moments[j].good, h.moments[j].bad) };
+    return true;
+  });
+  const novs = res.novelties || [];
+  const order = preferFirst(novs, prevNov);
+  let ni = order.find((i) => posKey(novs[i].fen) === key) ?? -1;
+  let novArrows = [];
+  if (ni < 0) {  // pozycja PRZED nowinką - podpowiedz ruch
+    ni = order.find((i) => posKey(novs[i].parent_fen) === key) ?? -1;
+    if (ni >= 0) {
+      const u = novs[ni].line_uci.at(-1);
+      novArrows = [{ from: u.slice(0, 2), to: u.slice(2, 4), color: "#2f7bd9", opacity: 0.8 }];
+    }
+  }
+  if (ni >= 0) found.nov = { el: $(`#tab-nov .nov[data-i="${ni}"]`), arrows: novArrows };
+  const sum = [...$$("#tab-tree summary")].find((s) => s.dataset.key === key);
+  if (sum) {
+    // rozwiń gałęzie prowadzące do tego węzła
+    let d = sum.parentElement.parentElement.closest("details");
+    while (d) { d.open = true; d = d.parentElement.closest("details"); }
+    found.tree = { el: sum, arrows: [] };
+  }
+
+  for (const [tab, f] of Object.entries(found)) {
+    if (!f.el) continue;
+    if (tab === "tree") f.el.classList.add("cur"); else f.el.classList.add("sel");
+    $(`.tab[data-tab="${tab}"]`).classList.add("has-match");
+  }
+  state.matches = found;
+  scrollToMatch();
+  // strzałki jak po kliknięciu - tylko gdy nic innego ich nie ustawiło
+  if (!state.arrows.length) {
+    const active = ($(".tab.active") || {}).dataset?.tab;
+    const pick = [found[active], found.traps, found.hard, found.nov].find((f) => f && f.arrows && f.arrows.length);
+    if (pick) {
+      state.arrows = pick.arrows;
+      board.set({ arrows: state.arrows });
+    }
+  }
+}
+
+function scrollToMatch() {
+  const active = ($(".tab.active") || {}).dataset?.tab;
+  const f = (state.matches || {})[active];
+  const el = f && (f.focus || f.el);
+  if (el) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
 // numer ruchu dla ruchu zagranego w pozycji `fen`
@@ -538,7 +622,7 @@ function renderTree(res) {
       const g = gamesStr(c.local_games, c.lichess_games);
       if (g) meta.push(`<span class="muted small">${g}</span>`);
       const sub = build(c, p, depth + 1);
-      return `<li><details ${depth < 1 ? "open" : ""}><summary data-path="${p.join(",")}" class="${mine ? "mine" : "opp"}">
+      return `<li><details ${depth < 1 ? "open" : ""}><summary data-path="${p.join(",")}" data-key="${posKey(c.fen)}" class="${mine ? "mine" : "opp"}">
         <b>${label}</b> ${meta.join(" ")}</summary>${sub}</details></li>`;
     }).join("");
     return `<ul>${items}</ul>`;
@@ -733,6 +817,7 @@ $("#btn-pgn").onclick = async () => {
 $$(".tab").forEach((b) => (b.onclick = () => {
   $$(".tab").forEach((x) => x.classList.toggle("active", x === b));
   for (const t of ["traps", "hard", "nov", "tree"]) $("#tab-" + t).classList.toggle("hidden", b.dataset.tab !== t);
+  scrollToMatch();
 }));
 
 updateEvalLabel();
