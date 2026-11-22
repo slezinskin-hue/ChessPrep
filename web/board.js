@@ -16,7 +16,8 @@ class Board {
     this._build();
   }
 
-  static GLYPH = { K: "♚", Q: "♛", R: "♜", B: "♝", N: "♞", P: "♟" };
+  // Figury "cburnett" (domyślny zestaw Lichess, autor Colin M.L. Burnett, GPLv2+).
+  static pieceUrl(p) { return `url("pieces/${p}.svg")`; }
 
   _build() {
     this.el.innerHTML = "";
@@ -79,7 +80,7 @@ class Board {
     sqs.forEach((sq, i) => {
       const d = document.createElement("div");
       const f = "abcdefgh".indexOf(sq[0]), r = +sq[1];
-      d.className = "cp-sq " + ((f + r) % 2 === 1 ? "light" : "dark");
+      d.className = "cp-sq " + ((f + r) % 2 === 1 ? "dark" : "light"); // a1 (f=0, r=1) = ciemne
       d.dataset.sq = sq;
       if (this.lastMove && this.lastMove.includes(sq)) d.classList.add("last");
       if (this.check === sq) d.classList.add("check");
@@ -89,9 +90,9 @@ class Board {
       }
       const p = this.pieces[sq];
       if (p) {
-        const s = document.createElement("span");
-        s.className = "cp-pc " + (p[0] === "w" ? "white" : "black");
-        s.textContent = Board.GLYPH[p[1]] + "︎";
+        const s = document.createElement("div");
+        s.className = "cp-pc";
+        s.style.backgroundImage = Board.pieceUrl(p);
         if (this.drag && this.drag.from === sq) s.classList.add("ghost");
         d.appendChild(s);
       }
@@ -149,12 +150,11 @@ class Board {
     if (this.dests[sq]) {
       this.selected = sq;
       const p = this.pieces[sq];
-      const float = document.createElement("span");
-      float.className = "cp-pc cp-float " + (p[0] === "w" ? "white" : "black");
-      float.textContent = Board.GLYPH[p[1]] + "︎";
+      const float = document.createElement("div");
+      float.className = "cp-pc cp-float";
+      float.style.backgroundImage = Board.pieceUrl(p);
       const size = this.squaresEl.getBoundingClientRect().width / 8;
       float.style.width = float.style.height = size + "px";
-      float.style.fontSize = size * 0.82 + "px";
       document.body.appendChild(float);
       this.drag = { from: sq, float, size, moved: false, x: e.clientX, y: e.clientY };
       this._place(e);

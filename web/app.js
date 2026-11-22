@@ -132,6 +132,8 @@ async function userMove(from, to) {
 function askPromotion() {
   return new Promise((resolve) => {
     const dlg = $("#dlg-promo");
+    const color = curFen().split(" ")[1];
+    dlg.querySelectorAll("button").forEach((b) => (b.style.backgroundImage = Board.pieceUrl(color + b.dataset.p)));
     dlg.onclose = () => resolve(dlg.returnValue || "q");
     dlg.showModal();
   });

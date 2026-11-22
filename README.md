@@ -101,3 +101,5 @@ data/          (lokalne) indeks, pamięć ocen, zapisane wyszukiwania
 * Oceny pokazywane są zawsze z perspektywy białych.
 * Wyniki silnika są zapamiętywane (`data/evals.sqlite`), więc ponowne szukanie
   w tej samej okolicy jest dużo szybsze.
+* Figury szachowe: zestaw „cburnett” (Colin M.L. Burnett, GPLv2+), ten sam co
+  domyślny na Lichess (`web/pieces/`).
