@@ -109,3 +109,11 @@ dialog label { display: flex; flex-direction: column; gap: 4px; }
 .promo { display: flex; gap: 6px; }
 .promo button { width: 64px; height: 64px; background-size: cover; background-color: var(--light); }
 dialog:has(.promo) { min-width: 0; }
+
+.help { background: #0003; border-radius: 4px; padding: 4px 8px; margin-bottom: 8px; font-size: 12px; }
+.help summary { cursor: pointer; color: var(--accent); }
+.help p { margin: 6px 0; line-height: 1.45; }
+.trap .num { color: var(--muted); font-weight: 700; }
+.trap-body { margin: 4px 0 2px; }
+.badlist { margin: 2px 0 4px; padding-left: 18px; font-size: 13px; }
+.badmv { color: #ff8a7f; }

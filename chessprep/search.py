@@ -17,7 +17,8 @@ Rozwijamy najpierw pozycje, do których przeciwnik najczęściej dojdzie
 Miary (szansa wygranej liczona krzywą Lichess z centypionów):
 
 * ``loss(m)`` - ile szansy wygranej przeciwnik oddaje ruchem m względem najlepszego,
-* ``trick`` w węźle przeciwnika = Σ p(m)·loss(m) - oczekiwana strata przeciwnika tu i teraz,
+* ``trick`` w węźle przeciwnika = Σ p(m)·loss(m) po ruchach będących błędami (loss ≥ MISTAKE)
+  - oczekiwana strata przeciwnika tu i teraz,
 * ``value`` - to samo zsumowane w głąb drzewa (przeciwnik może pomylić się teraz
   albo później), w naszych węzłach wybieramy najlepszy ruch pomniejszony o jego
   obiektywny koszt względem najlepszego ruchu silnika.
@@ -43,7 +44,8 @@ from . import human as human_mod
 from .config import DATA_DIR
 
 WIN_K = 0.00368208          # krzywa Lichess: cp -> szansa wygranej
-GOOD_LOSS = 0.08            # strata do tej wartości = ruch "w porządku"
+MISTAKE = 0.10              # spadek szansy wygranej od tej wartości = błąd (jak "mistake" na Lichess)
+MIN_ERROR_CHANCE = 0.08     # pułapka = co najmniej tyle ludzi popełnia tu błąd
 WINNING_CP = 300            # od tej oceny uznajemy pozycję za wygraną - nie rozwijamy dalej
 PRIOR_GAMES = 25            # ile partii "jest warta" Maia przy mieszaniu ze statystykami
 
@@ -69,6 +71,7 @@ class SearchParams:
     depth: int = 16                 # głębokość silnika w trakcie szukania
     verify_depth: int = 21          # głębokość weryfikacji wyników
     use_lichess: bool = True
+    lichess_source: str = "players"  # "players" | "masters" | "both"
     use_local_db: bool = True
     speeds: list = field(default_factory=lambda: ["blitz", "rapid", "classical"])
 
@@ -141,7 +144,8 @@ class HumanPolicy:
                 for m in r["moves"]:
                     merged[m.uci] = merged.get(m.uci, 0) + m.games
         if self.p.use_lichess and self.stats.lichess.enabled:
-            r = self.stats.lichess.query(board, self.p.elo_min, self.p.elo_max, self.p.speeds)
+            r = self.stats.lichess_query(board, self.p.elo_min, self.p.elo_max, self.p.speeds,
+                                         self.p.lichess_source)
             if r["available"]:
                 lichess_total = r["total"]
                 for m in r["moves"]:
@@ -263,7 +267,8 @@ class Searcher:
         policy, lt, lit = self.policy(b)
         node.policy = policy
         node.local_games, node.lichess_games = lt, lit
-        lines = self.eng.analyse(b, depth=p.depth, multipv=3)
+        # płytszy przegląd tylko po to, by znać najlepsze ruchy silnika; dokładne oceny niżej
+        lines = self.eng.analyse(b, depth=max(10, p.depth - 4), multipv=3)
         self.analysed += 1
         if not lines:
             return []
@@ -276,12 +281,16 @@ class Searcher:
                 break
             chosen.append(u)
             cum += pr
-        missing = [chess.Move.from_uci(u) for u in chosen if u not in evals]
-        if missing:
-            for u, l in self.eng.eval_moves(b, missing, p.depth).items():
-                evals[u] = self.my_cp(l)
-        best_u = lines[0].move
-        opp_best = min(evals.values())  # przeciwnik minimalizuje naszą ocenę
+        # Wszystkie kandydaty (ludzkie + najlepsze silnika) oceniamy JEDNYM przeszukaniem
+        # MultiPV z ograniczeniem do tych ruchów - wtedy oceny są ze sobą porównywalne.
+        cands = list(dict.fromkeys(chosen + [l.move for l in lines]))
+        if len(cands) > 1:
+            full = self.eng.analyse(b, depth=p.depth, multipv=len(cands),
+                                    moves=[chess.Move.from_uci(u) for u in cands])
+            if full:
+                evals = {l.move: self.my_cp(l) for l in full}
+        best_u = min(evals, key=evals.get)  # przeciwnik minimalizuje naszą ocenę
+        opp_best = evals[best_u]
         node.best_cp = node.my_cp = opp_best
         wc_best = win_chance(opp_best)
         info = []
@@ -289,7 +298,8 @@ class Searcher:
         for u, cp in sorted(evals.items(), key=lambda kv: -policy.get(kv[0], 0)):
             loss = max(0.0, win_chance(cp) - wc_best)
             pr = policy.get(u, 0.0)
-            trick += pr * loss
+            if loss >= MISTAKE:  # liczą się tylko prawdziwe błędy, nie drobne niedokładności
+                trick += pr * loss
             info.append({"uci": u, "san": b.san(chess.Move.from_uci(u)), "p": round(pr, 4),
                          "cp": cp, "loss": round(loss, 4), "best": u == best_u})
         node.move_info = info
@@ -301,7 +311,7 @@ class Searcher:
         replies = 0
         for d in info:
             u = d["uci"]
-            if d["loss"] > GOOD_LOSS and not d["best"]:
+            if d["loss"] >= MISTAKE and not d["best"]:
                 continue  # przeciwnik się pomylił - dalej nie trzeba
             if not d["best"] and replies >= p.opp_max_replies:
                 continue
@@ -368,10 +378,20 @@ class Searcher:
 
     # ------------------------------------------------------------ wyniki
     def collect_traps(self) -> list[Node]:
-        traps = [n for n in self.nodes.values()
-                 if n.board.turn != self.side and n.expanded and n.trick >= 0.03
-                 and n.verified is not False]
-        traps.sort(key=lambda n: -(n.reach * n.trick + 0.15 * n.trick))
+        cands = []
+        for n in self.nodes.values():
+            if n.board.turn == self.side or not n.expanded or n.verified is False:
+                continue
+            err = sum(d["p"] for d in n.move_info if d["loss"] >= MISTAKE)
+            if err >= MIN_ERROR_CHANCE and n.trick >= 0.01:
+                cands.append(n)
+        cands.sort(key=lambda n: -(n.reach * n.trick + 0.15 * n.trick))
+        traps, seen = [], set()
+        for n in cands:  # ta sama pozycja przez transpozycję - tylko raz
+            key = n.board.epd()
+            if key not in seen:
+                seen.add(key)
+                traps.append(n)
         return traps
 
     def verify(self, traps: list[Node]) -> None:
@@ -425,8 +445,8 @@ class Searcher:
         trap_list = []
         for t in traps[:40]:
             path = t.path()
-            good = [d for d in t.move_info if d["loss"] <= GOOD_LOSS]
-            bad = [d for d in t.move_info if d["loss"] > GOOD_LOSS]
+            good = [d for d in t.move_info if d["loss"] < MISTAKE]
+            bad = [d for d in t.move_info if d["loss"] >= MISTAKE]
             trap_list.append({
                 "node": t.id, "fen": t.board.fen(), "line": [n.san for n in path[1:]],
                 "line_uci": [n.move.uci() for n in path[1:]],

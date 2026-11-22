@@ -150,8 +150,29 @@ class Stats:
         return r
 
     def lichess_query(self, board: chess.Board, elo_min: int, elo_max: int,
-                      speeds: list[str] | None = None) -> dict:
-        return self.lichess.query(board, elo_min, elo_max, speeds)
+                      speeds: list[str] | None = None, source: str = "players") -> dict:
+        """source: "players" (gracze Lichess, filtr rankingu i tempa), "masters"
+        (partie mistrzowskie OTB, bez filtrów) albo "both" (suma obu)."""
+        parts = []
+        if source in ("players", "both"):
+            parts.append(self.lichess.query(board, elo_min, elo_max, speeds))
+        if source in ("masters", "both"):
+            parts.append(self.lichess.masters(board))
+        parts = [p for p in parts if p["available"]]
+        if not parts:
+            return {"available": False, "total": 0, "moves": [], "source": source}
+        if len(parts) == 1:
+            return {**parts[0], "source": source}
+        merged: dict[str, dict] = {}
+        for p in parts:
+            for m in p["moves"]:
+                t = merged.setdefault(m["uci"], {"uci": m["uci"], "games": 0, "white": 0, "draws": 0,
+                                                 "black": 0, "avg_rating": None})
+                for k in ("games", "white", "draws", "black"):
+                    t[k] += m[k]
+        moves = sorted(merged.values(), key=lambda m: -m["games"])
+        return {"available": True, "total": sum(p["total"] for p in parts), "moves": moves,
+                "opening": parts[0].get("opening", ""), "source": source}
 
 
 _shared: Stats | None = None

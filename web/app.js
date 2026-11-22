@@ -170,7 +170,10 @@ async function loadStats(fen) {
   const tbl = $("#stats-table");
   tbl.innerHTML = '<tr><td class="muted">ładuję…</td></tr>';
   try {
-    const r = await api(`/api/stats?fen=${encodeURIComponent(fen)}&elo_min=${lo}&elo_max=${hi}&speeds=${speeds}`);
+    const src = $("#p-lsource").value;
+    const srcName = { players: "Lichess", masters: "Masters", both: "Lichess+M" }[src];
+    const srcTitle = { players: "gracze Lichess, wybrany zakres i tempo", masters: "partie mistrzowskie (bez filtra rankingu)", both: "gracze Lichess + Masters" }[src];
+    const r = await api(`/api/stats?fen=${encodeURIComponent(fen)}&elo_min=${lo}&elo_max=${hi}&speeds=${speeds}&source=${src}`);
     if (my !== statsToken) return;
     const rows = {};
     const add = (src, list, key = "games") => (list || []).forEach((m) => {
@@ -189,7 +192,7 @@ async function loadStats(fen) {
     const score = (m) => m && m.games ? Math.round((100 * (m.white + m.draws / 2)) / m.games) + "%" : "";
     tbl.innerHTML = `<tr><th>Ruch</th><th title="Maia-2: jak często człowiek z tego zakresu zagra ten ruch">Maia</th>
       <th title="Lokalna baza (OTB), wybrany zakres rankingu">Baza ${lt !== null ? "(" + lt.toLocaleString("pl") + ")" : ""}</th>
-      <th title="Lichess, wybrany zakres i tempo">Lichess ${lit !== null ? "(" + lit.toLocaleString("pl") + ")" : ""}</th>
+      <th title="${srcTitle}">${srcName} ${lit !== null ? "(" + lit.toLocaleString("pl") + ")" : ""}</th>
       <th title="Wynik białych w partiach Lichess">Białe</th></tr>` +
       list.map((m) => `<tr data-uci="${m.uci}">
         <td><b>${m.san}</b></td>
@@ -242,6 +245,7 @@ function searchParams() {
     opp_max_replies: +$("#p-replies").value,
     opp_coverage: +$("#p-cover").value,
     use_lichess: $("#p-lichess").checked,
+    lichess_source: $("#p-lsource").value,
     use_local_db: $("#p-local").checked,
     speeds: $$(".p-speed").filter((c) => c.checked).map((c) => c.value),
   };
@@ -314,29 +318,47 @@ function showResult(res) {
     el.innerHTML = `<p class="muted">Brak pułapek spełniających kryteria. Spróbuj szerszego zakresu, większej liczby
       pozycji albo łagodniejszego progu oceny.</p>`;
   } else {
-    el.innerHTML = `<p class="muted small">Przeanalizowano ${res.analysed} pozycji. „Szansa dojścia” = jak często ludzie z
-      zakresu ${res.params.elo_min}–${res.params.elo_max} trafią w tę pozycję po Twoich ruchach.
-      „Szansa błędu” = jak często zagrają tu ruch, który według silnika wyraźnie psuje ich pozycję.</p>` +
+    const range = `${res.params.elo_min}–${res.params.elo_max}`;
+    const oppName = color === "white" ? "czarnych" : "białych";
+    el.innerHTML = `<details class="help"><summary>Jak to czytać?</summary>
+      <p>Pułapka to pozycja (po Twoim ruchu), w której <b>przeciwnik często gra naturalny, ale zły ruch</b>.
+      „Naturalny” = tak zagrałby typowy gracz ${range} (Maia-2 + statystyki partii), „zły” = silnik pokazuje
+      wyraźny spadek jego szans (jak „mistake” na Lichess).</p>
+      <p>Każda karta mówi: jaką linię grasz, co przeciwnik najczęściej tu psuje i jakie odpowiedzi trzymają pozycję.
+      Wszystkie Twoje ruchy w linii mieszczą się w ustawionym progu oceny. Kliknij kartę, żeby zobaczyć pozycję
+      na szachownicy (czerwone strzałki = błędy przeciwnika, zielone = dobre odpowiedzi).</p>
+      <p><b>Dojście</b> – jak często przeciwnik z tego zakresu sam doprowadzi do tej pozycji swoimi typowymi ruchami.
+      <b>Siła pułapki</b> – średnio ile % szansy wygranej przeciwnik tu oddaje (wyżej = lepiej).
+      Oceny zawsze z perspektywy białych.</p></details>
+      <p class="muted small">Przeanalizowano ${res.analysed} pozycji, znaleziono ${res.traps.length} pułapek
+      (od najlepszych: częste dojście × duży i częsty błąd).</p>` +
       res.traps.map((t, i) => {
-        const line = lineText(rootFen, t.line);
+        const line = t.line.length ? lineText(rootFen, t.line) : "(od razu w tej pozycji)";
+        const mvNo = (san) => {
+          const f = t.fen.split(" ");
+          return f[5] + (f[1] === "w" ? "." : "…") + san;
+        };
+        const ev = (d) => fmtEval(myToWhite(d.cp, color));
         const bad = t.bad.slice(0, 3).map((d) =>
-          `<span class="mvchip bad" title="ocena po tym ruchu">${d.san} <small>${pctStr(d.p)} → ${fmtEval(myToWhite(d.cp, color))}</small></span>`).join("");
-        const good = t.good.slice(0, 3).map((d) =>
-          `<span class="mvchip good">${d.san} <small>${pctStr(d.p)} → ${fmtEval(myToWhite(d.cp, color))}</small></span>`).join("");
-        const rare = t.path_games.map((g) => g.lichess ?? g.local).filter((x) => x !== null && x !== undefined);
+          `<li><b class="badmv">${mvNo(d.san)}</b> – zagra to ok. <b>${pctStr(d.p)}</b> graczy, ocena spada do <b>${ev(d)}</b></li>`).join("");
+        const good = t.good.slice(0, 3).map((d) => `${mvNo(d.san)} <small>(${pctStr(d.p)}, ${ev(d)})</small>`).join(", ");
         return `<div class="trap" data-i="${i}">
           <div class="trap-head">
-            <span class="score" title="Oczekiwana strata przeciwnika (szansy wygranej) w tej pozycji">${(t.trick * 100).toFixed(0)}</span>
+            <span class="num">#${i + 1}</span>
             <span class="line">${line}</span>
           </div>
-          <div class="trap-meta">
-            <span>szansa dojścia <b>${pctStr(t.reach)}</b></span>
-            <span>szansa błędu <b>${pctStr(t.error_chance)}</b></span>
-            ${t.only_move ? '<span class="tag">jedyny ruch</span>' : ""}
-            ${t.verified === true ? '<span class="tag ok" title="ścieżka sprawdzona na większej głębokości">✓ zweryfikowane</span>' : ""}
-            <span class="muted">${gamesStr(t.local_games, t.lichess_games)}</span>
+          <div class="trap-body">
+            <div class="muted small">Ruch ${oppName}. Naturalne, ale złe:</div>
+            <ul class="badlist">${bad}</ul>
+            <div class="small">${t.only_move ? '<span class="tag">jedyny dobry ruch</span> ' : '<span class="muted">Dobre odpowiedzi:</span> '}${good}</div>
           </div>
-          <div class="trap-moves"><span class="muted small">Przeciwnik:</span> ${bad} ${good}</div>
+          <div class="trap-meta">
+            <span title="Szansa, że przeciwnik swoimi typowymi ruchami doprowadzi do tej pozycji">dojście <b>${pctStr(t.reach)}</b></span>
+            <span title="Ile % ludzi popełnia tu błąd">błąd <b>${pctStr(t.error_chance)}</b></span>
+            <span title="Średnio ile % szansy wygranej przeciwnik tu oddaje">siła <b>${(t.trick * 100).toFixed(1)}</b></span>
+            ${t.verified === true ? '<span class="tag ok" title="Twoje ruchy w linii sprawdzone na większej głębokości">✓ zweryfikowane</span>' : ""}
+            <span class="muted" title="Liczba partii z tą pozycją (wybrany zakres rankingu)">${gamesStr(t.local_games, t.lichess_games)}</span>
+          </div>
         </div>`;
       }).join("");
     el.querySelectorAll(".trap").forEach((d) => {
@@ -473,6 +495,7 @@ $("#p-color").onchange = () => {
 };
 $("#p-elo-min").onchange = $("#p-elo-max").onchange = () => loadStats(curFen());
 $$(".p-speed").forEach((c) => (c.onchange = () => loadStats(curFen())));
+$("#p-lsource").onchange = () => loadStats(curFen());
 $("#auto-engine").onchange = () => { if ($("#auto-engine").checked) loadEngine(curFen()); };
 $("#btn-search").onclick = startSearch;
 $("#btn-cancel").onclick = () => state.job && api(`/api/search/${state.job}/cancel`, { method: "POST" });

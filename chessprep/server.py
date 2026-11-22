@@ -147,12 +147,12 @@ def analyse(fen: str, depth: int = 16, multipv: int = 3):
 
 @app.get("/api/stats")
 def stats(fen: str, elo_min: int = 1600, elo_max: int = 2000, lichess: bool = True,
-          speeds: str = "blitz,rapid,classical", maia: bool = True):
+          speeds: str = "blitz,rapid,classical", maia: bool = True, source: str = "players"):
     b = _board(fen)
     st = explorer_mod.shared()
     out: dict = {"local": st.local_query(b, elo_min, elo_max)}
     if lichess and st.lichess.enabled:
-        out["lichess"] = st.lichess_query(b, elo_min, elo_max, speeds.split(","))
+        out["lichess"] = st.lichess_query(b, elo_min, elo_max, speeds.split(","), source)
         out["lichess_error"] = st.lichess.error
     if maia:
         probs = human_mod.shared().probs(b, elo_min, elo_max)
@@ -241,9 +241,9 @@ def _tree_to_pgn(result: dict) -> str:
                 continue
             g = gnode.add_variation(mv)
             parts = [f"ocena {fmt_cp(ch['eval'])}"]
-            if ch.get("moves_info") and ch["trick"] >= 0.03:
-                bad = [d for d in ch["moves_info"] if d["loss"] > 0.08]
-                good = [d for d in ch["moves_info"] if d["loss"] <= 0.08]
+            bad = [d for d in ch.get("moves_info") or [] if d["loss"] >= 0.10]
+            good = [d for d in ch.get("moves_info") or [] if d["loss"] < 0.10]
+            if bad and sum(d["p"] for d in bad) >= 0.08:
                 parts.append("PUŁAPKA: naturalne błędy " + ", ".join(
                     f"{d['san']} ({d['p'] * 100:.0f}%, {fmt_cp(d['cp'])})" for d in bad[:3]))
                 parts.append("dobre: " + ", ".join(f"{d['san']} ({d['p'] * 100:.0f}%)" for d in good[:3]))
