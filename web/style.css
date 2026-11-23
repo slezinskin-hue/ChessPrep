@@ -189,3 +189,14 @@ dialog.export-open { min-width: 520px; }
 #dlg-export section { margin: 8px 0; }
 #dlg-export a, .setbox a { color: var(--accent); }
 #exp-study { width: 100%; box-sizing: border-box; }
+
+/* 0.5: nowe miary i stany */
+.ci { color: var(--muted); font-size: 11px; }
+.small-sample { opacity: .7; }
+.costtxt { color: #f0b37e; }
+.warntxt { color: var(--warn); }
+.opp-info { margin-top: 4px; padding: 3px 6px; background: #5b9bd51a; border-radius: 3px; }
+#opp-box { margin: 6px 0; }
+#opp-box > summary { cursor: pointer; color: var(--muted); }
+#opp-box p { margin: 4px 0; }
+.qitem { margin-right: 8px; white-space: nowrap; }

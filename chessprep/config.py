@@ -25,6 +25,8 @@ DEFAULTS: dict = {
     "index_max_plies": 30,
     # Lichess
     "lichess_token": "",
+    # Model ludzkich ruchów: "auto" (Maia-3, jeśli zainstalowana), "maia2", "maia3-5m", "maia3-23m"
+    "human_model": "auto",
     # Maia-2 ("rapid" lub "blitz")
     "maia_type": "rapid",
     # Serwer lokalny

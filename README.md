@@ -30,10 +30,13 @@ naprawdę wpadają, linii z kilkoma trudnymi ruchami do znalezienia oraz rzadko 
 
 | | |
 |---|---|
-| **Pułapki** | Pozycje, w których przeciwnik często gra naturalny, ale zły ruch. Przy każdym błędzie widać, ilu graczy go zagra, ocenę po nim i **karę**, czyli linię silnika, która go wykorzystuje. |
+| **Pułapki** | Pozycje, w których przeciwnik często gra naturalny, ale zły ruch. Przy każdym błędzie widać, ilu graczy go zagra, ocenę po nim i **karę**, czyli linię silnika, która go wykorzystuje. Ranking: oczekiwana strata przeciwnika na partię (dojście × siła), z ograniczeniem liczby wyników z jednej rodziny wariantów. |
+| **Miary praktyczne** | **Zysk** (o ile rośnie Twój oczekiwany wynik dzięki ludzkim błędom), **na 100 partii** (zysk × szansa dojścia), **koszt** (ile oddajesz swoimi ruchami względem najlepszych), **ukrycie** (od jakiej głębokości silnik widzi błąd). |
 | **Trudne linie** | Warianty, w których przeciwnik musi kilka razy z rzędu znaleźć trudny, nieoczywisty ruch. Odbicia, wymuszone ucieczki z szacha i ruchy „same się grające” nie liczą się jako trudne. |
 | **Nowinki** | Twoje ruchy rzadko grane (lub nigdy, **TN**) w pozycjach będących teorią, najwyżej 0,5 piona gorsze od najlepszego ruchu silnika. |
-| **Prawdziwe partie** | Dla każdej pułapki: ilu graczy z Twojego rankingu naprawdę w nią wpadło (baza lokalna, Lichess, Masters) i jaki był potem Twój wynik. |
+| **Prawdziwe partie** | Dla każdej pułapki: ilu graczy z Twojego rankingu naprawdę w nią wpadło (baza lokalna, Lichess, Masters) i jaki był potem Twój wynik, z 95% przedziałem ufności. |
+| **Przeciwnik** | Wczytujesz partie konkretnego gracza (Lichess, chess.com albo z lokalnej bazy po nazwisku). W jego pozycjach liczą się jego własne ruchy, a przy pułapkach widać, ile razy już do nich dochodził i czy wpadał. |
+| **Długie szukania** | Tryb „do godziny” (np. całą noc do 15:00), zapis wyników co 15 minut, podgląd wyników częściowych, „Zakończ i zweryfikuj”, kolejka kolejnych szukań. |
 | **Rodziny wariantów** | Wyniki o wspólnym początku są zgrupowane i można je zwijać. „Szukaj głębiej” uruchamia nowe wyszukiwanie od wybranej rodziny. |
 | **Repertuar** | Gwiazdki ★ i notatki przy wynikach, filtry (★ moje, zweryfikowane, ukryte, TN). |
 | **Eksport** | Do studium Lichess, z osobnym rozdziałem dla każdej rodziny, komentarzami, `?`/`!` i karą za błędy. Także PGN do schowka (ChessBase itp.). |
@@ -44,7 +47,7 @@ naprawdę wpadają, linii z kilkoma trudnymi ruchami do znalezienia oraz rzadko 
 | Składnik | Rola |
 |---|---|
 | **Stockfish** (lub inny silnik UCI) | Obiektywna ocena. Twoje ruchy w wariancie nie schodzą poniżej ustawionego progu (np. białymi ≥ −0,5, czarnymi ≤ +1,0). Najlepsze wyniki są na końcu sprawdzane na większej głębokości. |
-| **Maia-2** | Sieć neuronowa (CSSLab, Uniwersytet w Toronto), która przewiduje, jaki ruch zagra **człowiek** o danym rankingu. To z niej bierze się „naturalność” ruchu. |
+| **Maia-2 / Maia-3** | Sieci neuronowe (CSSLab, Uniwersytet w Toronto), które przewidują, jaki ruch zagra **człowiek** o danym rankingu. To z nich bierze się „naturalność” ruchu. Maia-3 zna rankingi 600–2600 i jest dokładniejsza; instaluje się ją osobno (niżej). W pozycjach bez partii przewidywany odsetek błędów jest kalibrowany na prawdziwych partiach, bo model go przeszacowuje. |
 | **Twoja baza PGN** | Zindeksowana według pozycji i przedziałów rankingu: ile partii, jakie ruchy, jakie wyniki. Indeksowanie 17 mln partii trwa ok. 2 godzin i robi się w tle. |
 | **Explorer Lichess** | Statystyki z partii graczy Lichess (z filtrem rankingu i tempa) i/lub z bazy Masters. |
 
@@ -74,6 +77,22 @@ python -m venv .venv
 
 Instalacja pobiera m.in. PyTorch (CPU, ok. 200 MB), z którego korzysta Maia-2.
 
+### Maia-3 (opcjonalnie, zalecane)
+
+Maia-3 (2026) zna rankingi 600–2600 (Maia-2 tylko do 2000), uwzględnia ranking obu graczy i kilka
+poprzednich pozycji, i trafniej przewiduje ludzkie ruchy. Nie ma jej na PyPI – instaluje się ją z
+repozytorium autorów:
+
+```powershell
+.venv\Scripts\python -m pip install git+https://github.com/CSSLab/maia3.git
+```
+
+Po instalacji (i restarcie programu) ustawienie „Model ludzkich ruchów: automatycznie” samo jej użyje
+(gdyby nie dało się jej załadować, program sam wróci do Mai-2 i pokaże błąd w pasku stanu);
+wagi (~20 MB dla modelu 5M) pobiorą się przy pierwszym użyciu do `models/maia3/`. Kod Mai-3 jest na licencji
+AGPL-3.0. Maia-2 słabo przewiduje pierwsze ~10 ruchów partii – tam program i tak opiera się głównie na
+statystykach partii.
+
 ## Pierwsze uruchomienie
 
 ```powershell
@@ -99,9 +118,15 @@ Możesz też dwukrotnie kliknąć `ChessPrep.bat`. Jeśli program nie znajdzie s
 
 1. **Ustaw pozycję**: przeciągaj figury, wklej PGN/FEN albo kliknij ruch w tabeli „Ruchy ludzi”.
    „Nowa” wraca do pozycji wyjściowej.
-2. **Ustaw szukanie**: kolor, najgorszą akceptowaną ocenę, ranking przeciwników i głębokość
-   wariantu, potem kliknij **Szukaj**. Pasek pokazuje postęp i przewidywany czas; wyszukiwanie
-   można przerwać i zachować wyniki częściowe.
+2. **Ustaw szukanie**: kolor, najgorszą akceptowaną ocenę, ranking przeciwników, głębokość
+   wariantu i to, jak długo szukać: **określoną liczbę pozycji** albo **do godziny** (program sam
+   zostawi czas na weryfikację). Potem kliknij **Szukaj**. W trakcie:
+   * **Pokaż wyniki częściowe** – wyniki zapisywane co 15 minut (bez weryfikacji),
+   * **Zakończ i zweryfikuj** – kończy szukanie teraz, ale sprawdza najlepsze wyniki,
+   * **Przerwij** – od razu, bez weryfikacji,
+   * **Dodaj do kolejki** – kolejne szukanie ruszy, gdy skończy się bieżące (w kolejności dodania;
+     ✕ przy pozycji w kolejce ją usuwa).
+   Opcjonalnie w sekcji **Przeciwnik** wczytaj partie gracza i wybierz go w „Szukaj pod przeciwnika”.
 3. **Przeglądaj wyniki** w zakładkach *Pułapki*, *Trudne linie*, *Nowinki* i *Drzewo*:
    * kliknięcie karty ustawia pozycję na szachownicy ze strzałkami (czerwone = błędy przeciwnika,
      zielone = dobre odpowiedzi),
@@ -122,10 +147,14 @@ Możesz też dwukrotnie kliknąć `ChessPrep.bat`. Jeśli program nie znajdzie s
 | Ranking przeciwników | 1600–2000 | Dla kogo liczymy „naturalność” (Maia-2 + statystyki). |
 | Głębokość wariantu | 12 półruchów | Jak daleko od pozycji startowej sięga drzewo. |
 | Liczba analizowanych pozycji | 120 | Budżet wyszukiwania; więcej = dłużej i dokładniej. |
+| Szukaj | liczbę pozycji | **Określoną liczbę pozycji** albo **do godziny** (np. 15:00). |
 | Głębokość silnika / weryfikacji | 16 / 21 | Przy szukaniu / przy sprawdzaniu najlepszych wyników. |
+| Głębokość dla mało prawdopodobnych gałęzi | 14 | Gałęzie z szansą dojścia poniżej 1% liczone płycej (do tej głębokości przy 0,1%). Równa głębokości silnika = wyłączone. |
+| Min. szansa dojścia pułapki | 0,2% | Pułapki z mniejszą szansą dojścia idą na koniec listy („rzadkie dojście”). |
+| Wyników z jednej rodziny / maks. udział rodziny w budżecie | 4 / 50% | Różnorodność: jedna linia nie zajmie całej listy ani całego czasu szukania. |
 | Maks. strata vs najlepszy ruch | 1,2 piona | Jak bardzo Twój ruch może ustępować najlepszemu. |
 | Moje kandydaty / odpowiedzi przeciwnika | 4 / 4 | Szerokość drzewa. |
-| Nowinki: strata / „rzadko” / „teoria” | 0,5 piona / ≤ 10 partii / ≥ 50 partii | Kiedy ruch jest nowinką. |
+| Nowinki: strata / „nowinka” / „rzadki wariant” / „teoria” | 0,5 piona / ≤ 10 partii / ≤ 2% partii / ≥ 50 partii | Nowinka (N, TN = 0 partii) ma mało partii; „rzadki wariant” ma mały udział w partiach z tej pozycji, nawet przy dużej bazie. Ranking nowinek bierze pod uwagę, czy przeciwnik zaraz potem się myli i czy wychodzi poza teorię. |
 | Trudne momenty: min. % błędów / oczywisty ruch | 25% / Maia ≥ 50% | Kiedy moment jest trudny, a kiedy dobry ruch jest oczywisty. |
 | Baza Lichess | gracze | *gracze* (z filtrem rankingu i tempa), *Masters* albo *obie*. |
 
@@ -155,6 +184,9 @@ Wszystko, co lokalne, jest w `.gitignore`:
 | `data/evals/` | Pamięć ocen silnika (osobna dla każdego silnika); ponowne szukanie w tej samej okolicy jest dużo szybsze. |
 | `data/searches/` | Zapisane wyszukiwania (JSON). |
 | `data/marks.json` | Gwiazdki i notatki. |
+| `data/calibration.json` | Krzywa kalibracji przewidywanego odsetka błędów (uczy się z każdego szukania). |
+| `data/opponents/` | Wczytane partie przeciwników (ich „książki”). |
+| `models/maia3/` | Wagi Mai-3 (jeśli zainstalowana). |
 | `data/lichess.sqlite` | Pamięć odpowiedzi explorera Lichess (30 dni). |
 | `models/maia2/` | Wagi Maia-2. |
 
@@ -175,7 +207,7 @@ Budowa programu, algorytm, formaty danych i API są opisane w
 Kod na licencji **GPL-3.0** (zob. [LICENSE](LICENSE)).
 
 * [Stockfish](https://stockfishchess.org/), GPL-3.0, pobierany osobno.
-* [Maia-2](https://github.com/CSSLab/maia2) (CSSLab, Uniwersytet w Toronto): model ruchów ludzkich.
+* [Maia-2](https://github.com/CSSLab/maia2) i [Maia-3](https://github.com/CSSLab/maia3) (CSSLab, Uniwersytet w Toronto): modele ruchów ludzkich.
 * [Lichess](https://lichess.org/) za opening explorer i API studiów.
 * Figury: zestaw „cburnett” (Colin M.L. Burnett, GPLv2+), ten sam co domyślny na Lichess.
 * Pomysł ukrytych pułapek: jk_182, „Finding Traps with Stockfish”.

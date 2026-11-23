@@ -174,32 +174,42 @@ async function loadStats(fen) {
     const src = $("#p-lsource").value;
     const srcName = { players: "Lichess", masters: "Masters", both: "Lichess+M" }[src];
     const srcTitle = { players: "gracze Lichess, wybrany zakres i tempo", masters: "partie mistrzowskie (bez filtra rankingu)", both: "gracze Lichess + Masters" }[src];
-    const r = await api(`/api/stats?fen=${encodeURIComponent(fen)}&elo_min=${lo}&elo_max=${hi}&speeds=${speeds}&source=${src}`);
+    // poprzednie pozycje (Maia-3 bierze pod uwagę historię) i przeciwnik
+    const histMoves = state.moves.slice(0, state.cursor).map((m) => m.uci).join(",");
+    const opp = $("#p-opponent").value;
+    const r = await api(`/api/stats?fen=${encodeURIComponent(fen)}&elo_min=${lo}&elo_max=${hi}&speeds=${speeds}&source=${src}` +
+      `&hist_fen=${encodeURIComponent(state.startFen)}&hist_moves=${histMoves}&opponent=${encodeURIComponent(opp)}`);
     if (my !== statsToken) return;
     const rows = {};
-    const add = (src, list, key = "games") => (list || []).forEach((m) => {
+    const add = (src, list) => (list || []).forEach((m) => {
       rows[m.uci] = rows[m.uci] || { uci: m.uci, san: m.san };
       rows[m.uci][src] = m;
     });
     add("maia", r.maia);
     add("local", r.local && r.local.moves);
     add("lichess", r.lichess && r.lichess.moves);
+    const op = r.opponent && r.opponent.reached ? r.opponent : null;
+    if (op) add("opp", op.moves);
     const lt = r.local && r.local.available ? r.local.total : null;
     const lit = r.lichess && r.lichess.available ? r.lichess.total : null;
     const list = Object.values(rows).sort((a, b) =>
+      ((b.opp || {}).games || 0) - ((a.opp || {}).games || 0) ||
       ((b.maia || {}).p || 0) - ((a.maia || {}).p || 0) ||
       ((b.lichess || {}).games || 0) - ((a.lichess || {}).games || 0)).slice(0, 14);
     const pct = (n, t) => (t ? Math.round((100 * n) / t) + "%" : "");
     const score = (m) => m && m.games ? Math.round((100 * (m.white + m.draws / 2)) / m.games) + "%" : "";
-    tbl.innerHTML = `<tr><th>Ruch</th><th title="Maia-2: jak często człowiek z tego zakresu zagra ten ruch">Maia</th>
+    const model = r.human_model || "Maia";
+    tbl.innerHTML = `<tr><th>Ruch</th><th title="${model}: jak często człowiek z tego zakresu zagra ten ruch">${model.replace(/ \(.*\)/, "")}</th>
       <th title="Lokalna baza (OTB), wybrany zakres rankingu">Baza ${lt !== null ? "(" + lt.toLocaleString("pl") + ")" : ""}</th>
       <th title="${srcTitle}">${srcName} ${lit !== null ? "(" + lit.toLocaleString("pl") + ")" : ""}</th>
+      ${op ? `<th title="Partie przeciwnika (${esc(op.name)}) z tą pozycją; w nawiasie jego wynik">${esc(op.name)} (${op.reached})</th>` : ""}
       <th title="Wynik białych w partiach Lichess">Białe</th></tr>` +
       list.map((m) => `<tr data-uci="${m.uci}">
         <td><b>${m.san}</b></td>
         <td><div class="bar" style="--w:${Math.round(((m.maia || {}).p || 0) * 100)}%"></div>${m.maia ? Math.round(m.maia.p * 100) + "%" : ""}</td>
         <td>${m.local ? m.local.games.toLocaleString("pl") + ` <small>${pct(m.local.games, lt)}</small>` : ""}</td>
         <td>${m.lichess ? m.lichess.games.toLocaleString("pl") + ` <small>${pct(m.lichess.games, lit)}</small>` : ""}</td>
+        ${op ? `<td>${m.opp ? `<b>${m.opp.games}</b> <small>(${Math.round(m.opp.score * 100)}%)</small>` : ""}</td>` : ""}
         <td>${score(m.lichess)}</td></tr>`).join("");
     tbl.querySelectorAll("tr[data-uci]").forEach((tr) => {
       tr.onclick = () => { const u = tr.dataset.uci; userMove(u.slice(0, 2), u.slice(2, 4)); };
@@ -208,7 +218,8 @@ async function loadStats(fen) {
     if (!r.local.available) notes.push("Baza lokalna: indeks jeszcze nie gotowy.");
     else if (r.local.beyond_index) notes.push("Baza lokalna: pozycja głębiej niż zindeksowane półruchy.");
     if (r.lichess_error) notes.push("Lichess: " + r.lichess_error);
-    if (r.maia_error) notes.push("Maia: " + r.maia_error);
+    if (r.maia_error) notes.push(model + ": " + r.maia_error);
+    if (r.opponent && !r.opponent.reached) notes.push(`${r.opponent.name}: nie grał tej pozycji`);
     if (r.lichess && r.lichess.opening) notes.unshift(r.lichess.opening);
     $("#stats-note").textContent = notes.join(" · ");
   } catch (e) {
@@ -228,9 +239,25 @@ function updateEvalLabel() {
   if (!white && v < -0.5) $("#p-eval").value = 1.0;
 }
 
+// Godzina "HH:MM" -> znacznik czasu (dziś, a jeśli już minęła - jutro).
+function deadlineFrom(hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  if (d.getTime() < Date.now() + 6 * 60000) d.setDate(d.getDate() + 1);
+  return d.getTime() / 1000;
+}
+
+function updateModeUI() {
+  const time = $("#p-mode").value === "time";
+  $("#lbl-budget").classList.toggle("hidden", time);
+  $("#lbl-deadline").classList.toggle("hidden", !time);
+}
+
 function searchParams() {
   const color = $("#p-color").value;
   const v = +$("#p-eval").value;
+  const time = $("#p-mode").value === "time";
   return {
     fen: curFen(),
     color,
@@ -239,8 +266,10 @@ function searchParams() {
     elo_min: +$("#p-elo-min").value,
     elo_max: +$("#p-elo-max").value,
     max_plies: +$("#p-plies").value,
-    budget: +$("#p-budget").value,
+    budget: time ? 0 : +$("#p-budget").value,
+    deadline: time ? deadlineFrom($("#p-deadline").value || "15:00") : 0,
     depth: +$("#p-depth").value,
+    depth_min: Math.min(+$("#p-depth-min").value, +$("#p-depth").value),
     verify_depth: +$("#p-vdepth").value,
     my_candidates: +$("#p-cands").value,
     opp_max_replies: +$("#p-replies").value,
@@ -251,9 +280,17 @@ function searchParams() {
     speeds: $$(".p-speed").filter((c) => c.checked).map((c) => c.value),
     novelty_max_loss: Math.round(+$("#p-nov-loss").value * 100),
     novelty_max_games: +$("#p-nov-games").value,
+    novelty_max_share: +$("#p-nov-share").value / 100,
     theory_min_games: +$("#p-theory").value,
     hard_error: +$("#p-hard-err").value / 100,
     obvious_p: +$("#p-obvious").value / 100,
+    min_reach: +$("#p-min-reach").value / 100,
+    family_quota: +$("#p-fam-quota").value,
+    family_share: +$("#p-fam-share").value / 100,
+    // droga od początku partii do tej pozycji (zapisywana razem z wynikami)
+    pre_fen: state.startFen,
+    pre_moves: state.moves.slice(0, state.cursor).map((m) => m.uci),
+    opponent: $("#p-opponent").value,
   };
 }
 
@@ -265,8 +302,16 @@ function applyParams(p) {
   set("#p-eval", ((p.color === "white" ? p.min_eval : -p.min_eval) / 100).toFixed(1));
   set("#p-drop", p.max_drop / 100);
   set("#p-elo-min", p.elo_min); set("#p-elo-max", p.elo_max);
-  set("#p-plies", p.max_plies); set("#p-budget", p.budget);
+  set("#p-plies", p.max_plies);
+  if (p.budget) set("#p-budget", p.budget);
+  if (p.deadline) {
+    const d = new Date(p.deadline * 1000);
+    set("#p-deadline", `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`);
+  }
+  set("#p-mode", p.deadline && p.deadline * 1000 > Date.now() + 6 * 60000 ? "time" : "budget");
+  updateModeUI();
   set("#p-depth", p.depth); set("#p-vdepth", p.verify_depth);
+  set("#p-depth-min", p.depth_min ? p.depth_min : p.depth);
   set("#p-cands", p.my_candidates); set("#p-replies", p.opp_max_replies); set("#p-cover", p.opp_coverage);
   $("#p-lichess").checked = p.use_lichess !== false;
   set("#p-lsource", p.lichess_source);
@@ -274,8 +319,13 @@ function applyParams(p) {
   if (p.speeds) $$(".p-speed").forEach((c) => (c.checked = p.speeds.includes(c.value)));
   if (p.novelty_max_loss !== undefined) set("#p-nov-loss", p.novelty_max_loss / 100);
   set("#p-nov-games", p.novelty_max_games); set("#p-theory", p.theory_min_games);
+  if (p.novelty_max_share !== undefined) set("#p-nov-share", +(p.novelty_max_share * 100).toFixed(2));
   if (p.hard_error !== undefined) set("#p-hard-err", Math.round(p.hard_error * 100));
   if (p.obvious_p !== undefined) set("#p-obvious", Math.round(p.obvious_p * 100));
+  if (p.min_reach !== undefined) set("#p-min-reach", +(p.min_reach * 100).toFixed(2));
+  set("#p-fam-quota", p.family_quota);
+  if (p.family_share !== undefined) set("#p-fam-share", Math.round(p.family_share * 100));
+  if (p.opponent !== undefined && [...$("#p-opponent").options].some((o) => o.value === p.opponent)) set("#p-opponent", p.opponent);
   state.orientation = p.color;
 }
 
@@ -288,9 +338,11 @@ async function startSearch() {
   try {
     const info = await api("/api/search", { method: "POST", body: { params: searchParams() } });
     saveHistory(info.id);
+    if (state.job) {  // już coś liczy - nowe czeka w kolejce
+      refreshQueue();
+      return;
+    }
     state.job = info.id;
-    $("#btn-cancel").classList.remove("hidden");
-    $("#btn-search").disabled = true;
     pollJob();
   } catch (e) {
     $("#job").textContent = "Błąd: " + e.message;
@@ -299,8 +351,22 @@ async function startSearch() {
 
 function fmtTime(s) {
   if (s === null || s === undefined) return "?";
-  const m = Math.floor(s / 60);
+  s = Math.round(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  if (h) return `${h} h ${m} min`;
   return m ? `${m} min ${s % 60} s` : `${s} s`;
+}
+
+function fmtClock(ts) {
+  const d = new Date(ts * 1000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function setJobButtons(running, partial) {
+  $("#btn-cancel").classList.toggle("hidden", !running);
+  $("#btn-finish").classList.toggle("hidden", !running);
+  $("#btn-partial").classList.toggle("hidden", !(running && partial));
+  $("#btn-search").textContent = running ? "Dodaj do kolejki" : "Szukaj";
 }
 
 async function pollJob() {
@@ -308,15 +374,23 @@ async function pollJob() {
   let info;
   try { info = await api("/api/search/" + state.job); } catch (e) { $("#job").textContent = e.message; return; }
   if (info.status === "running" || info.status === "queued") {
-    const pct = info.total ? Math.round((100 * info.progress) / info.total) : 0;
+    let pct = info.total ? Math.round((100 * info.progress) / info.total) : 0;
+    let line;
+    if (info.status === "queued") line = "w kolejce…";
+    else if (info.deadline) {
+      const total = info.deadline - (Date.now() / 1000 - info.elapsed);
+      pct = Math.round((100 * info.elapsed) / Math.max(1, total));
+      line = `do ${fmtClock(info.deadline)} · ${info.progress} pozycji · ${fmtTime(info.elapsed)} · zostało ~${fmtTime(info.eta)}`;
+    } else line = `${info.progress}/${info.total} pozycji · ${fmtTime(info.elapsed)} · zostało ~${fmtTime(info.eta)}`;
+    if (info.finishing) line += " · kończę i weryfikuję…";
     $("#job").innerHTML = `<div class="progress"><div style="width:${Math.min(100, pct)}%"></div></div>
-      ${info.status === "queued" ? "w kolejce…" : `${info.progress}/${info.total} pozycji · ${fmtTime(info.elapsed)} · zostało ~${fmtTime(info.eta)}`}
-      <div class="ellipsis">${info.message || ""}</div>`;
+      ${line}<div class="ellipsis">${esc(info.message || "")}</div>`;
+    setJobButtons(true, info.partial_available);
+    refreshQueue();
     setTimeout(pollJob, 1500);
     return;
   }
-  $("#btn-cancel").classList.add("hidden");
-  $("#btn-search").disabled = false;
+  setJobButtons(false, false);
   const jobId = state.job;
   state.job = null;
   if (info.status === "error") { $("#job").textContent = "Błąd: " + info.error; return; }
@@ -324,6 +398,52 @@ async function pollJob() {
     `Czas: ${fmtTime(info.elapsed)}`;
   if (info.result) showResult(info.result);
   await loadSaved(jobId);
+}
+
+// Kolejka: czekające wyszukiwania z przyciskiem anulowania.
+async function refreshQueue() {
+  let q;
+  try { q = (await api("/api/queue")).queued; } catch (_) { return; }
+  $("#job-queue").innerHTML = q.length ? "W kolejce: " + q.map((j, i) =>
+    `<span class="qitem">${i + 1}. ${j.color === "white" ? "białe" : "czarne"} · ${j.elo} · ` +
+    `${j.deadline ? "do " + fmtClock(j.deadline) : j.budget + " poz."} ` +
+    `<button class="link" data-qcancel="${esc(j.id)}" title="Usuń z kolejki">✕</button></span>`).join(" ") : "";
+}
+
+$("#job-queue").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-qcancel]");
+  if (!b) return;
+  await api(`/api/search/${b.dataset.qcancel}/cancel`, { method: "POST" });
+  refreshQueue();
+});
+
+// ------------------------------------------------------------------ przeciwnik
+
+async function loadOpponents(select) {
+  try {
+    const r = await api("/api/opponents");
+    const cur = select || $("#p-opponent").value;
+    $("#p-opponent").innerHTML = '<option value="">— nikogo —</option>' + r.books.map((b) =>
+      `<option value="${esc(b.key)}">${esc(b.name)} · ${esc(b.source_label)} · ${b.games} partii (${b.white} b., ${b.black} cz.)</option>`).join("");
+    if (cur && r.books.some((b) => b.key === cur)) $("#p-opponent").value = cur;
+  } catch (_) {}
+}
+
+async function pollOpponent() {
+  let s;
+  try { s = await api("/api/opponent/status"); } catch (_) { return; }
+  const el = $("#opp-status");
+  if (s.running) {
+    el.innerHTML = `${esc(s.message)}${s.progress != null ? `<div class="progress"><div style="width:${Math.round(s.progress * 100)}%"></div></div>` : ""}`;
+    $("#btn-opp-load").disabled = true;
+    setTimeout(pollOpponent, 1500);
+    return;
+  }
+  $("#btn-opp-load").disabled = false;
+  if (s.error) el.innerHTML = `<span class="badtxt">${esc(s.error)}</span>`;
+  else if (s.message) el.textContent = s.message;
+  await loadOpponents(s.last && s.last.key);
+  if (s.last) { $("#p-opponent").value = s.last.key; loadStats(curFen()); }
 }
 
 // ------------------------------------------------------------------ wyniki
@@ -613,9 +733,11 @@ function plural(n, one, few, many) {
 // ------------------------------------------------------------------ filtry, gwiazdki, notatki
 
 const FILTERS = {
-  traps: [["all", "wszystkie"], ["star", "★ moje"], ["verified", "zweryfikowane"], ["hidden", "ukryte"]],
+  traps: [["all", "wszystkie"], ["main", "bez rzadkiego dojścia"], ["star", "★ moje"], ["verified", "zweryfikowane"],
+    ["hidden", "ukryte"], ["games", "z partiami w bazach"], ["opp", "przeciwnik tu był"]],
   hard: [["all", "wszystkie"], ["star", "★ moje"], ["verified", "zweryfikowane"]],
-  nov: [["all", "wszystkie"], ["star", "★ moje"], ["verified", "zweryfikowane"], ["tn", "TN (nigdy nie grane)"]],
+  nov: [["all", "wszystkie"], ["novelty", "tylko N/TN (bez rzadkich wariantów)"], ["star", "★ moje"],
+    ["verified", "zweryfikowane"], ["tn", "TN (nigdy nie grane)"]],
 };
 
 function resFilter(kind) { return localStorage.getItem("res-filter-" + kind) || "all"; }
@@ -641,6 +763,10 @@ function keepFn(kind, f = resFilter(kind)) {
     if (f === "verified") return it.verified === true;
     if (f === "hidden") return !!it.hidden;
     if (f === "tn") return it.games === 0;
+    if (f === "main") return !it.rare;
+    if (f === "games") return !!(it.local_games || it.lichess_games);
+    if (f === "opp") return !!(it.opponent && it.opponent.reached);
+    if (f === "novelty") return !it.rare_only;
     return true;
   };
 }
@@ -746,13 +872,50 @@ function realHtml(i) {
   const r = R.traps && R.traps[i];
   if (!r || (!r.local && !r.lichess)) return `<span class="muted">${R.failed ? "nie udało się sprawdzić partii" : "brak partii z tą pozycją w bazach"}</span>`;
   const lname = { players: "lichess", masters: "masters", both: "lichess+masters" }[R.lichess_source] || "lichess";
+  const ci = (c) => (c ? ` <span class="ci" title="95% przedział ufności">${pctStr(c[0])}–${pctStr(c[1])}</span>` : "");
   const src = (name, s) => {
     if (!s) return "";
     const after = s.score_after_bad != null && s.fell >= 3
-      ? `, potem Twój wynik <b>${pctStr(s.score_after_bad)}</b>${s.score_overall != null ? ` <span class="muted">(ogólnie ${pctStr(s.score_overall)})</span>` : ""}` : "";
-    return `${name}: wpadło <b>${s.fell.toLocaleString("pl")}</b> z ${s.total.toLocaleString("pl")} (${pctStr(s.fell_pct)})${after}`;
+      ? `, potem Twój wynik <b>${pctStr(s.score_after_bad)}</b>${ci(s.score_ci)}${s.score_overall != null ? ` <span class="muted">(ogólnie ${pctStr(s.score_overall)})</span>` : ""}` : "";
+    const txt = `${name}: wpadło <b>${s.fell.toLocaleString("pl")}</b> z ${s.total.toLocaleString("pl")} (${pctStr(s.fell_pct)}${ci(s.fell_ci)})${after}`;
+    return s.small ? `<span class="small-sample" title="Mało partii - liczby mało pewne">${txt} · mała próba</span>` : txt;
   };
   return "W partiach – " + [src("baza", r.local), src(lname, r.lichess)].filter(Boolean).join(" · ");
+}
+
+function reachStr(r) {
+  if (r == null) return "?";
+  if (r > 0 && r < 0.001) return "<0,1%";
+  return pctStr(r);
+}
+
+function hiddenTag(t) {
+  if (t.hidden_depth != null) {
+    return t.hidden
+      ? `<span class="tag hid" title="Silnik widzi, że zły ruch jest błędem dopiero od głębokości ${t.hidden_depth} - człowiekowi łatwo to przeoczyć">ukryta (gł. ${t.hidden_depth})</span>`
+      : `<span class="muted small" title="Silnik widzi błąd już na głębokości ${t.hidden_depth}">widać od gł. ${t.hidden_depth}</span>`;
+  }
+  return t.hidden ? '<span class="tag hid" title="Silnik na małej głębokości też wybrałby zły ruch">ukryta</span>' : "";
+}
+
+function oppHtml(o, res) {
+  if (!o || !res.opponent) return "";
+  const name = esc(res.opponent.name);
+  if (!o.reached) return "";
+  const moves = (o.moves || []).map((m) =>
+    `<span class="${m.bad ? "badmv" : ""}">${m.san} ${m.n}×</span>`).join(", ");
+  const fell = o.fell ? ` – <b>wpadł ${o.fell}×</b>` : "";
+  return `<div class="small opp-info">${name} był tu <b>${o.reached}×</b>${fell}: ${moves}</div>`;
+}
+
+function statsLine(res) {
+  const st = res.stats || {};
+  const parts = [`Przeanalizowano ${res.analysed} pozycji`];
+  if (st.transpositions) parts.push(`${st.transpositions} transpozycji połączonych`);
+  if (st.verified) parts.push(`zweryfikowano ${st.verified.traps} pułapek, ${st.verified.lines} linii i ${st.verified.novelties} nowinek`);
+  if (res.human_model) parts.push(`model: ${esc(res.human_model)}`);
+  if (res.opponent) parts.push(`przeciwnik: ${esc(res.opponent.name)} (${res.opponent.games} partii)`);
+  return parts.join(" · ") + "." + (res.partial ? ' <b class="warntxt">Wyniki częściowe (bez weryfikacji).</b>' : "");
 }
 
 function fillReal() { $$("#tab-traps [data-real]").forEach((e) => (e.innerHTML = realHtml(+e.dataset.real))); }
@@ -761,8 +924,8 @@ function fillReal() { $$("#tab-traps [data-real]").forEach((e) => (e.innerHTML =
 
 async function searchDeeper(line) {
   const res = state.result;
-  if (state.job) { $("#job").textContent = "Trwa inne wyszukiwanie - poczekaj albo je przerwij."; return; }
   applyParams(res.params);
+  if (res.params.deadline && $("#p-mode").value !== "time" && !res.params.budget) $("#p-budget").value = 400;
   await loadLine(res, line ? line.split(",") : [], []);
   $("#job").textContent = "Nowe wyszukiwanie od wybranej rodziny…";
   $("#btn-search").scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -822,7 +985,7 @@ function renderTraps(res) {
   const oppName = color === "white" ? "czarnych" : "białych";
   const help = `<details class="help"><summary>Jak to czytać?</summary>
     <p>Pułapka to pozycja (po Twoim ruchu), w której <b>przeciwnik często gra naturalny, ale zły ruch</b>.
-    „Naturalny” = tak zagrałby typowy gracz ${rangeStr(res)} (Maia-2 + statystyki partii), „zły” = silnik pokazuje
+    „Naturalny” = tak zagrałby typowy gracz ${rangeStr(res)} (Maia + statystyki partii), „zły” = silnik pokazuje
     spadek jego szansy wygranej o co najmniej 10% (jak „mistake” na Lichess).</p>
     <p><b>Dojście</b> – jak często przeciwnik sam doprowadzi do tej pozycji swoimi typowymi ruchami.
     <b>Błąd</b> – ilu ludzi zagra tu zły ruch. <b>Siła</b> – średnio ile % szansy wygranej przeciwnik tu oddaje.
@@ -830,13 +993,19 @@ function renderTraps(res) {
     <span class="tag">jedyny ruch</span> – tylko jeden ruch nie jest błędem. Oceny zawsze z perspektywy białych.</p>
     <p><b>Kara</b> – jak silnik wykorzystuje błąd (kliknij, żeby zobaczyć na szachownicy, dalej strzałką →).
     <b>W partiach</b> – ilu graczy z wybranego rankingu naprawdę wpadło w tę pułapkę w bazie / na Lichess i jaki potem
-    był Twój wynik (dla porównania: wynik ze wszystkich partii z tą pozycją). ★ oznacza pułapkę do repertuaru.</p></details>`;
+    był Twój wynik (dla porównania: wynik ze wszystkich partii z tą pozycją), z 95% przedziałem ufności. ★ oznacza pułapkę do repertuaru.</p>
+    <p><b>Zysk</b> – o ile rośnie Twój oczekiwany wynik w tej pozycji dzięki ludzkim błędom (w porównaniu z najlepszą obroną).
+    <b>Na 100 partii</b> – to samo w punktach na 100 partii od pozycji startowej (uwzględnia dojście).
+    <b>Koszt</b> – ile oceny oddajesz swoimi ruchami w linii względem najlepszych ruchów silnika.
+    <b>Ukrycie</b> – od jakiej głębokości silnik widzi, że zły ruch jest błędem (im głębiej, tym trudniej człowiekowi).
+    <span class="tag soft">bez partii</span> / <span class="tag soft">mało partii</span> – przewidywany błąd pochodzi (głównie) z modelu, więc część z modelu jest skalibrowana na prawdziwych partiach
+    (model przeszacowuje wysokie odsetki błędów). Pułapki z bardzo małym dojściem są na końcu listy.</p></details>`;
   if (!traps.length) {
     el.innerHTML = help + `<p class="muted">Brak pułapek. Spróbuj większej liczby pozycji, innego zakresu rankingu
       albo łagodniejszego progu oceny.</p>`;
     return;
   }
-  el.innerHTML = help + `<p class="muted small">Przeanalizowano ${res.analysed} pozycji. Najlepsze = częste dojście × częsty i duży błąd.</p>` +
+  el.innerHTML = help + `<p class="muted small">${statsLine(res)} Najlepsze = dojście × siła (oczekiwana strata przeciwnika na partię).</p>` +
     toolbar("traps") + renderFamilies(traps, rootFen, (n) => plural(n, "pułapka", "pułapki", "pułapek"), (i, num, dim) => {
       const t = traps[i];
       const line = t.line.length ? lineHtml(rootFen, t.line, dim) : "(od razu w tej pozycji)";
@@ -853,13 +1022,19 @@ function renderTraps(res) {
           <ul class="badlist">${bad}</ul>
           <div class="small">${t.only_move ? '<span class="tag">jedyny dobry ruch</span> ' : '<span class="muted">Dobre odpowiedzi:</span> '}${good}</div>
           <div class="real small" data-real="${i}" title="Prawdziwe partie z wybranego zakresu rankingu: ile razy zagrano zły ruch i jak potem kończyły się partie (wynik z Twojej perspektywy)">${realHtml(i)}</div>
+          ${oppHtml(t.opponent, res)}
         </div>
         <div class="trap-meta">
-          <span title="Szansa, że przeciwnik swoimi typowymi ruchami doprowadzi do tej pozycji">dojście <b>${pctStr(t.reach)}</b></span>
-          <span title="Ile % ludzi popełnia tu błąd (przewidywanie Maia-2 + statystyki)">błąd <b>${pctStr(t.error_chance)}</b></span>
+          <span title="Szansa, że przeciwnik swoimi typowymi ruchami doprowadzi do tej pozycji">dojście <b>${reachStr(t.reach)}</b></span>
+          <span title="Ile % ludzi popełnia tu błąd${t.calibrated ? ` (model: ${pctStr(t.error_raw || 0)}, po kalibracji na partiach)` : ""}">błąd <b>${pctStr(t.error_chance)}</b></span>
           <span title="Średnio ile % szansy wygranej przeciwnik tu oddaje">siła <b>${(t.trick * 100).toFixed(1)}</b></span>
-          ${t.hidden ? '<span class="tag hid" title="Silnik na małej głębokości też wybrałby zły ruch">ukryta</span>' : ""}
-          ${t.verified === true ? '<span class="tag ok" title="Twoje ruchy w linii sprawdzone na większej głębokości">✓ zweryfikowane</span>' : ""}
+          ${t.gain != null ? `<span title="O ile rośnie Twój oczekiwany wynik w tej pozycji dzięki ludzkim błędom">zysk <b>+${(t.gain * 100).toFixed(1)}%</b></span>` : ""}
+          ${t.per100 != null ? `<span title="Oczekiwany zysk w punktach na 100 partii od pozycji startowej (dojście × zysk)">na 100 partii <b>+${t.per100.toFixed(t.per100 < 1 ? 2 : 1)} pkt</b></span>` : ""}
+          ${t.cost >= 10 ? `<span class="costtxt" title="Ile oceny oddajesz swoimi ruchami w tej linii względem najlepszych ruchów silnika">koszt <b>−${(t.cost / 100).toFixed(2)}</b></span>` : ""}
+          ${hiddenTag(t)}
+          ${t.calibrated ? `<span class="tag soft" title="${t.games_total ? `Tylko ${t.games_total} partii - błąd w dużej części przewiduje model` : "Brak partii - błąd przewiduje sam model"}; część z modelu skalibrowano na prawdziwych partiach (przed kalibracją ${pctStr(t.error_raw || 0)})">${t.games_total ? "mało partii" : "bez partii"}</span>` : ""}
+          ${t.rare ? '<span class="tag soft" title="Bardzo mała szansa dojścia - poniżej progu z ustawień">rzadkie dojście</span>' : ""}
+          ${t.verified === true ? `<span class="tag ok" title="Twoje ruchy w linii${t.reverified ? " i błąd przeciwnika" : ""} sprawdzone na większej głębokości">✓ zweryfikowane</span>` : ""}
           <span class="muted" title="Liczba partii z tą pozycją (wybrany zakres rankingu)">${gamesStr(t.local_games, t.lichess_games)}</span>
         </div>
       </div>`;
@@ -900,7 +1075,7 @@ function renderHard(res) {
       const bad = m.bad.slice(0, 2).map((b, k) => `${mvNo(m.fen, b.san)} <small>${pctStr(b.p)} → ${ev(b)}</small> <small>${refHtml(m.fen, b, k, j)}</small>`).join("; ");
       const kind = m.type === "only" ? '<span class="tag">jedyny ruch</span>' : '<span class="tag soft">trudny wybór</span>';
       return `<li data-sub="${j}" class="moment" title="Pokaż tę pozycję">
-        ${kind} ${m.hidden ? '<span class="tag hid">ukryta</span>' : ""}
+        ${kind} ${hiddenTag(m)} ${m.calibrated ? `<span class="tag soft" title="Błąd w dużej części z modelu, skalibrowany na prawdziwych partiach">${m.games ? "mało partii" : "bez partii"}</span>` : ""}
         ${good} – myli się <b>${pctStr(m.error)}</b>${bad ? `, np. ${bad}` : ""}</li>`;
     }).join("");
     return `<div class="hline ${mark("hard", h).star ? "starred" : ""}" data-i="${i}">
@@ -910,7 +1085,9 @@ function renderHard(res) {
       <ol class="moments">${moments}</ol>
       <div class="trap-meta">
         <span title="Szansa, że typowy gracz znajdzie wszystkie trudne ruchy">przejdzie bez błędu <b>${pctStr(h.survive)}</b></span>
-        <span title="Szansa, że przeciwnik dojdzie do pierwszego trudnego momentu">dojście <b>${pctStr(h.entry_reach)}</b></span>
+        <span title="Szansa, że przeciwnik dojdzie do pierwszego trudnego momentu">dojście <b>${reachStr(h.entry_reach)}</b></span>
+        ${h.exp_errors != null ? `<span title="Oczekiwana liczba błędów przeciwnika w tej linii na 100 partii od pozycji startowej (uwzględnia szansę dojścia do każdego momentu)">≈ <b>${(h.exp_errors * 100).toFixed(1)}</b> błędów / 100 partii</span>` : ""}
+        ${h.cost >= 10 ? `<span class="costtxt" title="Ile oceny oddajesz swoimi ruchami w tej linii">koszt <b>−${(h.cost / 100).toFixed(2)}</b></span>` : ""}
         ${h.verified === true ? '<span class="tag ok">✓ zweryfikowane</span>' : ""}
         <span class="muted">${gamesStr(h.local_games, h.lichess_games)}</span>
       </div>
@@ -952,11 +1129,14 @@ function renderNovelties(res) {
     const follow = n.follow_trap
       ? `<div class="small" data-sub="1" title="Pokaż pułapkę"><span class="muted">Dalej pułapka:</span> ${lineText(rootFen, n.follow_trap.line)}
          <small>(błąd ${pctStr(n.follow_trap.error)})</small></div>` : "";
-    const games = n.games === 0 ? '<span class="tag tn">TN</span> nigdy nie grane' : `grane <b>${n.games}</b>×`;
+    const share = n.share != null && n.parent_games ? ` (${(n.share * 100).toFixed(n.share < 0.01 ? 2 : 1)}%)` : "";
+    const games = n.games === 0 ? '<span class="tag tn">TN</span> nigdy nie grane'
+      : n.rare_only ? `<span class="tag soft" title="Ruch ma sporo partii, ale mały udział w tej pozycji">rzadki wariant</span> grane <b>${n.games.toLocaleString("pl")}</b>×${share}`
+      : `grane <b>${n.games}</b>×${share}`;
     return `<div class="nov ${mark("nov", n).star ? "starred" : ""}" data-i="${i}">
       <div class="trap-head"><span class="num">#${num}</span><span class="line">${pre}</span>${markHtml("nov", n)}</div>
       ${noteHtml("nov", n)}
-      <div class="nov-move"><b class="novmv">${mvNo(n.parent_fen, n.san)}!?</b> N
+      <div class="nov-move"><b class="novmv">${mvNo(n.parent_fen, n.san)}!?</b> ${n.rare_only ? "" : n.tn ? "TN" : "N"}
         <span class="muted small">– ${games} na ${(n.parent_games || 0).toLocaleString("pl")} partii w tej pozycji</span></div>
       <div class="small">Ocena <b>${ev(n.eval)}</b> · najlepszy ruch silnika ${n.best_san ? mvNo(n.parent_fen, n.best_san) : "?"} ${ev(n.best_cp)}
         <span class="muted">(różnica ${(n.loss / 100).toFixed(2)})</span></div>
@@ -965,6 +1145,8 @@ function renderNovelties(res) {
       <div class="trap-meta">
         ${n.verified === true ? '<span class="tag ok">✓ zweryfikowane</span>' : '<span class="muted">niezweryfikowane</span>'}
         ${n.error >= 0.08 ? `<span>od razu błąd u <b>${pctStr(n.error)}</b> ludzi</span>` : ""}
+        ${n.follow > 0.001 ? `<span title="Średnio ile % szansy wygranej przeciwnik oddaje w kilku ruchach po nowince (wg modelu ludzkich ruchów)">potem przeciwnik traci <b>${(n.follow * 100).toFixed(1)}%</b></span>` : ""}
+        ${n.out_of_book ? '<span class="tag tn" title="Po nowince nie ma żadnych partii - przeciwnik musi myśleć sam">poza teorią</span>' : ""}
       </div>
     </div>`;
   }, keepFn("nov"));
@@ -977,17 +1159,27 @@ function renderNovelties(res) {
   });
 }
 
+// Ruchy od początku partii do pozycji wyszukiwania: zapisane z wynikami (od wersji 0.5),
+// a dla starszych wyszukiwań - z pamięci okna.
 function searchHistory(res) {
+  const p = res.params || {};
+  if (p.pre_fen) return { startFen: p.pre_fen, moves: p.pre_moves || [] };
   return JSON.parse(localStorage.getItem("hist-" + res.id) || "null");
 }
 
 // upTo = ile ruchów z `ucis` pokazać na szachownicy (reszta dostępna strzałką →)
 async function loadLine(res, ucis, arrows, upTo = null) {
   const hist = searchHistory(res);
-  const startFen = hist ? hist.startFen : res.params.fen;
-  const pre = hist ? hist.moves : [];
-  const all = pre.concat(ucis);
-  const r = await api("/api/line", { method: "POST", body: { fen: startFen, moves: all } });
+  let startFen = hist ? hist.startFen : res.params.fen;
+  let pre = hist ? hist.moves : [];
+  let r = await api("/api/line", { method: "POST", body: { fen: startFen, moves: pre.concat(ucis) } });
+  // historia musi kończyć się na pozycji wyszukiwania - inaczej ją pomijamy
+  const reached = pre.length ? (r.moves[pre.length - 1] || {}).fen : startFen;
+  if (!reached || posKey(reached) !== posKey(res.params.fen)) {
+    startFen = res.params.fen;
+    pre = [];
+    r = await api("/api/line", { method: "POST", body: { fen: startFen, moves: ucis } });
+  }
   state.startFen = startFen;
   state.moves = r.moves;
   state.cursor = upTo === null ? r.moves.length : Math.min(r.moves.length, pre.length + upTo);
@@ -1015,6 +1207,7 @@ function renderTree(res) {
       else if (c.trick >= 0.03) meta.push(`<span class="tag" title="oczekiwana strata przeciwnika w tej pozycji">pułapka ${(c.trick * 100).toFixed(0)}</span>`);
       if (c.hidden) meta.push('<span class="tag hid">ukryta</span>');
       if (c.verified === true) meta.push('<span class="tag ok">✓</span>');
+      if (c.transposition) meta.push('<span class="tag soft" title="Ta sama pozycja jest w drzewie inną kolejnością ruchów">↔ transpozycja</span>');
       const g = gamesStr(c.local_games, c.lichess_games);
       if (g) meta.push(`<span class="muted small">${g}</span>`);
       const sub = build(c, p, depth + 1);
@@ -1034,13 +1227,15 @@ function renderTree(res) {
 async function loadSaved(selectId) {
   const r = await api("/api/searches");
   const sel = $("#saved");
+  const running = new Set(r.running.map((j) => j.id));
   sel.innerHTML = '<option value="">— zapisane wyszukiwania —</option>' + r.saved.map((s) =>
-    `<option value="${s.id}">${s.created || ""} · ${s.color === "white" ? "białe" : "czarne"} · ${s.elo} · ${s.traps} pułapek · ${s.hard ?? 0} linii · ${s.novelties ?? 0} nowinek</option>`).join("");
+    `<option value="${s.id}">${running.has(s.id) ? "⏳ " : ""}${s.created || ""} · ${s.color === "white" ? "białe" : "czarne"} · ${s.elo}` +
+    `${s.opponent ? " · vs " + esc(s.opponent) : ""} · ${s.traps} pułapek · ${s.hard ?? 0} linii · ${s.novelties ?? 0} nowinek` +
+    `${s.partial ? " · częściowe" : ""}</option>`).join("");
   if (selectId) sel.value = selectId;
+  refreshQueue();
   if (r.running.length && !state.job) {
-    state.job = r.running[0].id;
-    $("#btn-cancel").classList.remove("hidden");
-    $("#btn-search").disabled = true;
+    state.job = (r.running.find((j) => j.status === "running") || r.running[0]).id;
     pollJob();
   }
 }
@@ -1070,7 +1265,7 @@ async function loadStatus() {
     $("#status").innerHTML = [
       `<span class="${s.engine_path_ok ? "ok" : "bad"}" title="${s.engine_path || ""}">${s.engine_path_ok ? s.engine : "brak silnika"}</span>`,
       `<span class="${dbOk ? "ok" : db.building.running ? "warn" : db.pgn ? "bad" : "warn"}" title="${db.pgn || ""}">${dbLabel(db, s.index_available)}</span>`,
-      `<span class="${s.maia_error ? "bad" : "ok"}">Maia-2${s.maia_loaded ? "" : " (ładuje się przy 1. użyciu)"}</span>`,
+      `<span class="${s.maia_error ? "bad" : "ok"}" title="Model ludzkich ruchów">${esc(s.human_model || "Maia-2")}${s.maia_loaded ? "" : " (ładuje się przy 1. użyciu)"}</span>`,
       `<span class="${!s.lichess_token ? "bad" : s.lichess_error ? "warn" : "ok"}">Lichess${s.lichess_token ? "" : ": brak tokenu"}</span>`,
     ].join("");
     $("#set-info").textContent = s.lichess_error ? "Ostatni błąd Lichess: " + s.lichess_error : (s.lichess_token ? "Token ustawiony." : "Brak tokenu - statystyki Lichess wyłączone.");
@@ -1086,6 +1281,10 @@ async function loadStatus() {
 }
 
 function renderSettings(s) {
+  if (document.activeElement !== $("#set-human")) $("#set-human").value = s.human_model_setting || "auto";
+  $("#set-human-info").innerHTML = `Używany model: <b>${esc(s.human_model || "")}</b>.` +
+    (s.maia3_installed ? "" : ` Maia-3 nie jest zainstalowana – zobacz README („Maia-3”).`) +
+    (s.maia_error ? `<br><span class="badtxt">${esc(s.maia_error)}</span>` : "");
   const eng = $("#set-engine");
   eng.innerHTML = s.engine_path_ok
     ? `<b>${s.engine}</b><br><span class="path">${s.engine_path}</span>`
@@ -1195,10 +1394,32 @@ $("#p-lsource").onchange = () => loadStats(curFen());
 $("#auto-engine").onchange = () => { if ($("#auto-engine").checked) loadEngine(curFen()); };
 $("#btn-search").onclick = startSearch;
 $("#btn-cancel").onclick = () => state.job && api(`/api/search/${state.job}/cancel`, { method: "POST" });
+$("#btn-finish").onclick = () => state.job && api(`/api/search/${state.job}/finish`, { method: "POST" });
+$("#btn-partial").onclick = async () => {
+  if (!state.job) return;
+  const r = await api(`/api/search/${state.job}?partial=1`);
+  if (r.result) { showResult(r.result); $("#saved").value = ""; }
+};
+$("#p-mode").onchange = updateModeUI;
+$("#p-depth").onchange = () => { if (+$("#p-depth-min").value > +$("#p-depth").value) $("#p-depth-min").value = $("#p-depth").value; };
+$("#p-opponent").onchange = () => loadStats(curFen());
+$("#btn-opp-load").onclick = async () => {
+  try {
+    await api("/api/opponent/load", { method: "POST", body: { source: $("#opp-source").value, name: $("#opp-name").value, max_games: +$("#opp-max").value } });
+    pollOpponent();
+  } catch (e) { $("#opp-status").innerHTML = `<span class="badtxt">${esc(e.message)}</span>`; }
+};
+$("#set-human").onchange = () => settingsAction(async () => {
+  const r = await api("/api/settings", { method: "POST", body: { human_model: $("#set-human").value } });
+  $("#set-msg").textContent = "Model: " + r.human_model;
+  loadStats(curFen());
+});
 $("#saved").onchange = async () => {
   const id = $("#saved").value;
   if (!id) { closeResult(); return; }
-  const r = await api("/api/search/" + id);
+  let r = await api("/api/search/" + id);
+  // trwające wyszukiwanie: pokaż ostatni zapis częściowy
+  if (!r.result && (r.status === "running" || r.partial_available)) r = await api(`/api/search/${id}?partial=1`);
   if (r.result) showResult(r.result);
 };
 $("#btn-close-res").onclick = closeResult;
@@ -1348,7 +1569,8 @@ $$(".tab").forEach((b) => (b.onclick = () => {
 }));
 
 updateEvalLabel();
-refresh();
+updateModeUI();
+loadOpponents().then(() => refresh());
 loadStatus();
 loadSaved();
 

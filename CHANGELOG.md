@@ -1,5 +1,47 @@
 # Historia zmian
 
+## [0.5.0] – 2026-11-23
+
+Zmiany na podstawie nocnego szukania na 2500 pozycji (wnioski: `docs/POMYSLY.md`, sekcja 0).
+
+### Poprawki
+- Kliknięcie wyniku ustawiało pozycję po kilku ruchach, gdy zapamiętana w oknie historia ruchów nie
+  prowadziła do pozycji szukania. Historia zapisuje się teraz razem z wynikami (działa też po
+  restarcie) i jest sprawdzana przy każdym kliknięciu.
+- Weryfikacja sprawdza teraz także, czy błąd przeciwnika nadal jest błędem na głębokości
+  weryfikacji; fałszywe pułapki odpadają.
+
+### Lepsze wyniki
+- Nowy ranking pułapek: oczekiwana strata przeciwnika na partię (dojście × siła) bez punktów „za samą
+  siłę”; pułapki z bardzo małym dojściem idą na koniec („rzadkie dojście”), najwyżej kilka wyników z
+  jednej rodziny wariantów na początku listy.
+- Szukanie nie „nurkuje” w jedną forsowną linię: priorytet łączy szansę dojścia warunkową i
+  bezwarunkową, a jedna rodzina wariantów może zająć najwyżej część budżetu.
+- Kalibracja modelu ludzkich ruchów na prawdziwych partiach (Maia przeszacowuje wysokie odsetki
+  błędów: przewidywane 60–100% to w partiach ~42%). Kalibrowana jest tylko część przewidywania
+  pochodząca z modelu, nie z partii. Krzywa uczy się z każdego szukania.
+- Nowe miary: zysk praktyczny (oczekiwany wynik przeciw człowiekowi), punkty na 100 partii, koszt
+  linii, głębokość ukrycia błędu. Dotychczasowe wskaźniki zostały.
+- Trudne linie: wynik = oczekiwana liczba błędów przeciwnika (ważona szansą dojścia), bez dubli.
+- Nowinki: rzadkość także jako udział w partiach („rzadki wariant”); ranking według tego, czy
+  przeciwnik zaraz potem się myli i czy wychodzi poza teorię.
+- Limity wyników zależne od wielkości szukania (do 300 pułapek, 150 linii, 150 nowinek), więcej
+  wyników weryfikowanych.
+- Przy „W partiach” 95% przedział ufności i oznaczenie małej próby.
+
+### Szybsze i dłuższe szukanie
+- Transpozycje: ta sama pozycja jest liczona raz (w nocnym szukaniu powtórki zjadały 30% budżetu).
+  Gdy weryfikacja odrzuci jedną kolejność ruchów, wyniki osiągalne inną kolejnością zostają.
+- Konfigurowalna mniejsza głębokość silnika dla mało prawdopodobnych gałęzi.
+- Tryb „do godziny”, zapis wyników co 15 minut i podgląd wyników częściowych (także z listy
+  zapisanych), „Zakończ i zweryfikuj”, kolejka szukań w kolejności dodania, z usuwaniem z kolejki.
+
+### Nowe
+- **Maia-3** (opcjonalna, rankingi 600–2600) z wyborem modelu w ustawieniach; Maia-2 zostaje jako
+  domyślna, gdy Maia-3 nie jest zainstalowana albo nie da się jej załadować.
+- **Przygotowanie pod przeciwnika**: partie z Lichess, chess.com albo z lokalnej bazy (po nazwisku);
+  jego ruchy w szukaniu, kolumna w „Ruchy ludzi”, informacja przy pułapkach.
+
 ## [0.4.0] – 2026-11-22
 
 ### Nowe

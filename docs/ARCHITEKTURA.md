@@ -38,7 +38,7 @@ run.py ──► okno pywebview ──► http://127.0.0.1:8777 (uvicorn + FastA
 
 * Jeden proces Pythona z serwerem FastAPI. Okno to pywebview (Edge WebView2), interfejs to
   zwykła strona w `web/` bez frameworków i bez budowania.
-* Jedno wyszukiwanie naraz (jeden silnik). Wyszukiwanie działa w wątku, a interfejs co 1,5 s
+* Jedno wyszukiwanie naraz (jeden silnik), kolejne czekają w kolejce. Wyszukiwanie działa w wątku, a interfejs co 1,5 s
   pyta o postęp.
 * Wszystkie ciężkie zasoby (silnik, Maia, indeks, explorer) są współdzielone: `shared()` w
   każdym module.
@@ -52,11 +52,14 @@ run.py ──► okno pywebview ──► http://127.0.0.1:8777 (uvicorn + FastA
 | `__init__.py` | `__version__`, wstrzyknięcie `truststore` (systemowe certyfikaty, np. gdy antywirus skanuje HTTPS). |
 | `config.py` | `CONFIG`, `ROOT`, `DATA_DIR`, `WEB_DIR`, `load()`, `save_local()`. |
 | `engine.py` | `Engine`: UCI przez python-chess, `analyse(board, depth, multipv, moves=None)` zwraca listę `Line` (cp z perspektywy **białych**, WDL, pv). Pamięć ocen w `data/evals/<hash silnika>.sqlite`, klucz: EPD + ograniczenie ruchów (`root`); zapis z większą głębokością lub MultiPV obsłuży też płytsze zapytania. `resolve_engine_path()`, `probe()`, `set_engine()`. Bez okna konsoli (`CREATE_NO_WINDOW`). |
-| `human.py` | `Maia.probs(board, elo_min, elo_max)` daje rozkład ruchów człowieka. Średnia z ≤ 4 punktów Elo w zakresie (Maia-2 zna 1100–2000), wsadowo, z cache LRU. Wagi pobierają się do `models/maia2`. |
+| `human.py` | Model ludzkich ruchów: `Maia` (Maia-2, rankingi 1100–2000) i `Maia3` (pakiet `maia3`, 600–2600, historia 7 pozycji, głowica W/D/L). `shared()` wybiera wg `human_model` („auto” = Maia-3, jeśli zainstalowana). Gdy Maia-3 nie
+da się załadować, `Maia3` przekazuje zapytania do Mai-2 (`fallback`), a błąd pokazuje w statusie. `probs(board, elo_min, elo_max, history)` – średnia z ≤ 4 punktów Elo w zakresie, cache LRU. |
+| `calibration.py` | Krzywa „przewidywany odsetek błędów → faktyczny” (`Calibration.apply`), punkt startowy z pomiaru 23.11.2026, douczana z każdego szukania (`data/calibration.json`, osobno dla modelu i przedziału rankingu). |
+| `opponent.py` | Przeciwnik: pobieranie partii (Lichess `/api/games/user`, chess.com archiwa miesięczne, lokalny PGN po tagu White/Black), „książka” = pozycje, w których był na ruchu (`epd → [n, {uci: [ile, suma wyników]}]`), `Loader` w tle, `Book.dist/info`. |
 | `dbindex.py` | Indeks bazy PGN (pkt 7): budowa (`build`, CLI) i odczyt (`GameIndex.query`). |
 | `databases.py` | Wybór aktywnej bazy, katalog indeksu dla pliku, `IndexManager`: budowa w podprocesie z logiem, postęp z parsowania logu, przerwanie (`taskkill /T`), wznawianie. |
 | `explorer.py` | `LichessExplorer` (players/masters, token Bearer, cache SQLite 30 dni, twardy timeout 15 s, pauza 60 s po 429 lub zawieszeniu) i `Stats` (lokalny indeks + Lichess, scalanie źródeł). |
-| `search.py` | Algorytm (pkt 3), `SearchParams`, `Node`, `HumanPolicy`, `Searcher`, `JobManager` (wątki, zapis do `data/searches/<id>.json`), `refutation()`. |
+| `search.py` | Algorytm (pkt 3), `SearchParams`, `Node`, `HumanPolicy`, `Searcher`, `JobManager` (kolejka, zapis częściowy, `data/searches/<id>.json`), `refutation()`, `validate_history()`. |
 | `study.py` | Budowa rozdziałów PGN z wyników (`build_chapters`) i eksport do studium Lichess (`export_to_lichess`, `token_info`). |
 | `server.py` | Endpointy (pkt 5), eksport całego drzewa do PGN (`_tree_to_pgn`), gwiazdki/notatki, statystyki „w partiach”. |
 
@@ -70,44 +73,84 @@ Plik `search.py`; opis jest też w docstringu modułu.
   `loss ≥ MISTAKE (0.10)` oznacza błąd.
 * **error**: masa prawdopodobieństwa (wg `HumanPolicy`) ruchów-błędów. Gdy drugi najlepszy ruch
   silnika jest już błędem, wszystkie nieocenione ruchy też są błędami i ich masa się dolicza.
-* **trick**: oczekiwana strata przeciwnika, Σ p(m)·loss(m) po błędach.
-* **reach**: iloczyn prawdopodobieństw ruchów przeciwnika od korzenia; nasze ruchy mają p = 1.
+  W pozycjach z < 30 partiami error jest **kalibrowany** (`calibration.py`), ale tylko jego część
+  z modelu: `error' = error − w·(err_model − apply(err_model))`, `w = 25/(N+25)` (waga modelu
+  w `HumanPolicy`), `err_model` = masa złych ruchów wg samego modelu. p złych ruchów skalujemy do
+  `error'`, p dobrych odpowiednio w górę. `err_raw` = przed kalibracją.
+* **trick** (na kartach „siła”): oczekiwana strata przeciwnika, Σ p(m)·loss(m) po błędach.
+* **reach** (dojście): szansa dotarcia do pozycji. Po transpozycjach: maksimum po drogach przez
+  nasze ruchy (to alternatywy), suma po drogach przez ruchy przeciwnika (`compute_reach`).
+* **ev**: oczekiwany wynik (szansa wygranej z naszej perspektywy) – expectimax: na ruchu
+  przeciwnika Σ p(m)·ev(dziecko) (dla nierozwiniętych – szansa z oceny), na naszym ruchu max.
+  **gain** = ev − szansa przy najlepszej obronie (karta: „zysk”), **per100** = reach·gain·100.
+* **cost**: Σ po naszych ruchach na ścieżce (najlepszy ruch silnika − wybrany), w cp; obie oceny
+  z tej samej analizy MultiPV (`edge_cp`), więc weryfikacja na większej głębokości ich nie miesza.
+* **hidden_depth**: najmniejsza głębokość z (2, 4, …, 16), na której silnik widzi, że najczęstszy
+  zły ruch jest błędem (porównanie z najlepszym dobrym ruchem, MultiPV 2). `hidden` = > 6.
 
 ### HumanPolicy
-`p(m) = (games(m) + 25·maia(m)) / (N + 25)`, gdzie `games` to suma partii z lokalnej bazy
-i z Lichess w zakresie rankingu. Maia ma wagę 25 partii (`PRIOR_GAMES`): przy małej liczbie
-partii decyduje Maia, przy dużej statystyki.
+`p(m) = (games(m) + 25·model(m)) / (N + 25)`, gdzie `games` to suma partii z lokalnej bazy
+i z Lichess w zakresie rankingu. Model ma wagę 25 partii (`PRIOR_GAMES`). Gdy wczytano
+przeciwnika, w jego pozycjach (na ruchu jest przeciwnik): `p = (1−λ)·p + λ·p_przeciwnika`,
+`λ = n/(n+3)`, n = jego partie z tą pozycją. Uwaga: Maia-2 słabo przewiduje pierwsze ~10 ruchów
+(tam decydują statystyki – te pozycje mają dużo partii).
 
 ### Rozwijanie węzłów
 * **Nasz ruch** (`_expand_mine`): MultiPV = `my_candidates`. W pozycjach teoretycznych
-  (≥ `theory_min_games` partii) MultiPV = `novelty_multipv` (8), żeby wyłapać nowinki. Przechodzą
-  ruchy z oceną ≥ `min_eval` i stratą ≤ `max_drop`. Nowinka: ≤ `novelty_max_games` partii,
-  strata ≤ `novelty_max_loss`; TN, gdy 0 partii.
-* **Ruch przeciwnika** (`_expand_opponent`): płytki przegląd (MultiPV 3, głębokość −4), żeby znać
-  najlepsze ruchy silnika. Potem kandydaci = ruchy ludzi do pokrycia `opp_coverage` (+ top
-  silnika) oceniani **jednym** przeszukaniem MultiPV z ograniczeniem `searchmoves`, dzięki czemu
-  oceny są porównywalne. Dla błędów zapisujemy `pv` (karę, ≤ 9 półruchów, `refutation()`).
-  Do drzewa idą dobre ruchy (najwyżej `opp_max_replies`) oraz najlepszy ruch.
+  (≥ `theory_min_games` partii) MultiPV = `novelty_multipv` (8). Przechodzą ruchy z oceną
+  ≥ `min_eval` i stratą ≤ `max_drop`. Nowinka: strata ≤ `novelty_max_loss` oraz ≤
+  `novelty_max_games` partii (N; TN = 0) albo udział ≤ `novelty_max_share` („rzadki wariant”).
+* **Ruch przeciwnika** (`_expand_opponent` → `_score_opponent`): płytki przegląd (MultiPV 3,
+  głębokość −4), potem kandydaci = ruchy ludzi do pokrycia `opp_coverage` (+ top silnika)
+  oceniani **jednym** MultiPV z `searchmoves`. Dla błędów zapisujemy `pv` (kara, ≤ 9 półruchów).
+  Do drzewa idą dobre ruchy (najwyżej `opp_max_replies`) oraz najlepszy ruch. Pozycje z ≥ 100
+  partiami zasilają kalibrację (przewidziany vs faktyczny odsetek złych ruchów).
+* **Głębokość silnika** (`node_depth`): `depth` przy dojściu ≥ 1%, `depth_min` przy ≤ 0,1%,
+  pomiędzy – interpolacja logarytmiczna.
+* **Transpozycje** (`_add_child`): tablica `(epd, ply) → węzeł`; ta sama pozycja po tej samej
+  liczbie półruchów to jeden węzeł z wieloma rodzicami (`parents`, `edge_p`). Linia (`path`)
+  biegnie przez pierwszego rodzica; w eksporcie drzewa pozostałe krawędzie to „transpozycja”.
+  Weryfikacja usuwa złą pozycję ze wszystkich dróg (`_cut`); `_mark_alive` wyznacza węzły nadal
+  osiągalne i – gdy pierwsza droga została odcięta – przepina linię węzła na inną żywą drogę
+  (cel sprawdzany jest wtedy jeszcze raz, już nową drogą).
 * **Trudny moment** (`_classify_moment`): `error ≥ hard_error` i (jedyny dobry ruch **albo**
   `error ≥ max(0.5, hard_error)` przy kilku dobrych ruchach). Nie liczy się: jedyny legalny
-  ruch, ucieczka z szacha przy ≤ 3 ruchach, odbicie na polu ostatniego ruchu, dobry ruch z
-  Maia ≥ `obvious_p`. **Ukryta**: najlepszy ruch silnika na głębokości 6 jest błędem.
+  ruch, ucieczka z szacha przy ≤ 3 ruchach, odbicie, dobry ruch z modelem ≥ `obvious_p`.
 
 ### Kolejność (best-first)
-Kolejka priorytetowa po `prio`. Po ruchu przeciwnika `prio` mnożymy przez
-**warunkowe** p (= p(m)/p(dobre)), czyli zakładamy, że przeciwnik broni się dobrze. Dzięki temu
-po trudnym momencie linia jest rozwijana dalej i powstają linie z wieloma trudnymi ruchami. Koniec,
-gdy budżet `budget` jest wyczerpany, gdy pozycja jest wygrana (≥ 300 cp) lub gdy dojdziemy do `max_plies`.
+Priorytet = √(dojście warunkowe · dojście). Warunkowe zakłada dobrą obronę (p(m)/p(dobre)) –
+dzięki temu po trudnym momencie linia jest rozwijana dalej; bezwarunkowe nie pozwala zejść
+głęboko w linie, do których nikt nie dojdzie. Do tego limit `family_share` (domyślnie 50%)
+budżetu na jedną rodzinę (pierwszy ruch + odpowiedź): po przekroczeniu węzeł wraca do kolejki
+z połową priorytetu. Koniec: budżet `budget` (0 = bez limitu), albo w trybie **do godziny**
+(`deadline`) chwila `deadline − rezerwa` (12% czasu, min. 10 min; przy krótkich 20%), albo
+„Zakończ i zweryfikuj” (`job.finish`) / „Przerwij” (`job.cancel`, bez weryfikacji). Co 15 min
+zapis wyników częściowych (`results(verify=False, rarity=False)` – bez zapytań do Lichess,
+`partial: true`).
+
+### Kolejka
+`JobManager` ma jeden wątek roboczy i kolejkę FIFO: wyszukiwania ruszają w kolejności dodania.
+Anulowanie czekającego wyszukiwania (`POST /api/search/{id}/cancel`, w oknie ✕ przy kolejce) od razu
+wyjmuje je z kolejki. Wyszukiwanie „do godziny”, które wychodzi z kolejki, gdy do końca zostało
+< 5 minut (`MIN_TIME_LEFT`), kończy się błędem z opisem zamiast pustym wynikiem.
 
 ### Wyniki
-* **Pułapki**: węzły przeciwnika z `error ≥ 0.08` i `trick ≥ 0.01`, sortowane po
-  `reach·trick + 0.15·trick`, bez duplikatów pozycji (transpozycje); eksport 40 najlepszych.
-* **Trudne linie**: ścieżki do węzłów z momentem; momenty = wszystkie momenty na ścieżce;
-  wynik = `(0.3 + reach pierwszego) · (1 − Π(1 − error)) · premie`. Linie będące prefiksem
-  bogatszej linii są usuwane.
-* **Nowinki**: sortowane po popularności pozycji, bliskości do najlepszego ruchu i błędach dalej.
-* **Weryfikacja**: najlepsze pułapki, linie i nowinki są sprawdzane na `verify_depth`. Gdy
-  nasz ruch na ścieżce wypada poniżej progu, węzeł dostaje `verified = False` i znika.
+* **Pułapki**: węzły przeciwnika z `error ≥ 0.08`, `trick ≥ 0.01`, nieodrzucone przy weryfikacji;
+  sortowane po `reach · trick · ukrycie` (ukrycie: 0,8–1,0 wg `hidden_depth`, 0,9 gdy nieznane).
+  Pułapki z `reach < min_reach` na końcu (`rare`). Różnorodność (`_diversify`): najpierw najwyżej
+  `family_quota` z jednej rodziny (wspólne 4 półruchy), potem reszta.
+* **Trudne linie**: ścieżki do węzłów z momentem; wynik = Σ reach_k·error_k (×1,15 za jedyny ruch)
+  · (1 + 0,1·(liczba momentów − 1)) = oczekiwana liczba błędów; bez linii będących prefiksem
+  bogatszej i najwyżej 2 linie o tych samych dwóch pierwszych momentach na początku.
+* **Nowinki**: `teoria · jakość · (0,15 + 5·follow) · rodzaj · poza_teorią`, gdzie follow =
+  oczekiwana strata przeciwnika w 5 półruchach po nowince, rodzaj = 1,2 TN / 1,0 N / 0,6 rzadki
+  wariant, poza_teorią = 1,15 gdy po nowince nie ma partii.
+* **Limity**: pułapki `max(40, min(300, analysed/8))`, linie i nowinki `max(30, min(150, analysed/16))`.
+* **Weryfikacja** (`results(verify=True)`): ok. 20% najlepszych (pułapki 10–60, linie 8–25,
+  nowinki 10–25): nasze ruchy na ścieżce na `verify_depth` (spadek poniżej progu → gałąź
+  odcięta), a w pułapkach i momentach `reverify_opponent`: dobre i złe ruchy jeszcze raz jednym
+  MultiPV na `verify_depth` – gdy błąd przestał być błędem, węzeł jest `refuted`; potem głębokość
+  ukrycia. W trybie do godziny weryfikacja kończy się najpóźniej 5 min po `deadline`.
 
 ## 4. Format wyników
 
@@ -123,22 +166,32 @@ gdy budżet `budget` jest wyczerpany, gdy pozycja jest wygrana (≥ 300 cp) lub 
     "good": [{ "san": "d6", "uci": "d7d6", "p": 0.3, "cp": 20, "loss": 0.0, "maia": 0.2, "games": 812 }],
     "bad":  [{ "san": "Nxe4", "uci": "f6e4", "p": 0.4, "cp": 180, "loss": 0.2,
                "pv": { "uci": ["f6e4", "f1e1", "..."], "san": ["Nxe4", "Re1", "..."] } }],  // pv od 0.4
-    "eval": 30, "verified": true, "local_games": 5, "lichess_games": 4391
+    "eval": 30, "verified": true, "local_games": 5, "lichess_games": 4391,
+    // od 0.5:
+    "error_raw": 0.55, "calibrated": true, "hidden_depth": 8, "rare": false, "reverified": true,
+    "cost": 22, "ev": 0.61, "gain": 0.07, "per100": 1.9,
+    "opponent": { "reached": 12, "fell": 3, "moves": [{ "san": "Nxe4", "n": 3, "score": 0.33, "bad": true }] }
   }],
   "hard_lines": [{ "line": [], "line_uci": [], "moments": [{ "type": "only|hard", "error": 0.6,
                    "good": [], "bad": [], "hidden": false, "fen": "...", "line_uci": [] }],
-                   "survive": 0.2, "entry_reach": 0.3, "verified": true }],
+                   "survive": 0.2, "entry_reach": 0.3, "exp_errors": 0.12, "cost": 0, "verified": true }],
   "novelties": [{ "line": [], "line_uci": [], "san": "a4", "parent_fen": "...", "games": 0, "tn": true,
-                  "parent_games": 812, "loss": 20, "best_san": "...", "replies": [], "follow_trap": null }],
+                  "parent_games": 812, "loss": 20, "best_san": "...", "replies": [], "follow_trap": null,
+                  "share": 0.004, "rare_only": false, "follow": 0.03, "out_of_book": true }],
+  "stats": { "nodes": 8106, "transpositions": 750, "verified": { "traps": 60, "lines": 25, "novelties": 25 },
+             "calibration": [...], "elapsed": 29000 },
+  "human_model": "Maia-3 (5M)", "opponent": { /* meta książki przeciwnika */ }, "partial": false,
   "tree": { "children": [ /* węzły z moves_info, moment, novelty, eval, prob, ... */ ] }
 }
 ```
 
 * Wszystkie `cp` w wynikach są z perspektywy **naszego koloru** (`params.color`). Interfejs
   zamienia je na perspektywę białych (`myToWhite`).
-* `line`/`line_uci` liczone są od pozycji wyszukiwania. Ruchy, które do niej prowadziły, interfejs
-  trzyma w `localStorage["hist-<id>"]` (`startFen` + `moves`). Służą do odtwarzania linii na
-  szachownicy i jako początek rozdziałów eksportu.
+* `line`/`line_uci` liczone są od pozycji wyszukiwania. Ruchy, które do niej prowadziły, są w
+  `params.pre_fen` + `params.pre_moves` (od 0.5; serwer sprawdza je przy starcie –
+  `validate_history`; interfejs sprawdza jeszcze raz przy kliknięciu). Starsze wyszukiwania:
+  `localStorage["hist-<id>"]`. Służą do odtwarzania linii na szachownicy, jako historia dla
+  Mai-3 i jako początek rozdziałów eksportu.
 * Starsze wyszukiwania (sprzed 0.4) nie mają `pv`; karę liczy wtedy `POST /api/refute`.
 
 ## 5. API HTTP
@@ -150,19 +203,21 @@ gdy budżet `budget` jest wyczerpany, gdy pozycja jest wygrana (≥ 300 cp) lub 
 | `POST /api/line` `{fen, moves[]}` | UCI → SAN + FEN po każdym ruchu. |
 | `POST /api/parse_pgn` `{pgn}` | PGN albo FEN → pozycja startowa + ruchy. |
 | `GET /api/analyse?fen=&depth=&multipv=` | Analiza silnika (karta „Silnik”). |
-| `GET /api/stats?fen=&elo_min=&elo_max=&speeds=&source=` | „Ruchy ludzi”: baza lokalna, Lichess, Maia. |
+| `GET /api/stats?fen=&elo_min=&elo_max=&speeds=&source=&hist_fen=&hist_moves=&opponent=` | „Ruchy ludzi”: baza lokalna, Lichess, model (z historią), ruchy przeciwnika. |
 | `POST /api/search` `{params}` | Start wyszukiwania (zwraca `id`). |
-| `GET /api/search/{id}` | Postęp albo wynik (także zapisane). |
-| `POST /api/search/{id}/cancel`, `DELETE /api/search/{id}` | Przerwanie, usunięcie (z gwiazdkami). |
+| `GET /api/search/{id}[?partial=1]` | Postęp albo wynik (także zapisane); `partial=1` – wyniki częściowe trwającego szukania. |
+| `POST /api/search/{id}/finish` | Zakończ szukanie, ale zweryfikuj wyniki. |
+| `POST /api/search/{id}/cancel`, `DELETE /api/search/{id}` | Przerwanie bez weryfikacji, usunięcie (z gwiazdkami). |
 | `GET /api/searches` | Zapisane i trwające wyszukiwania. |
 | `GET /api/search/{id}/pgn` | Całe drzewo jako jeden PGN. |
 | `POST /api/refute` `{fen, uci, depth}` | Kara za ruch (linia silnika od tego ruchu). |
-| `GET /api/search/{id}/real` | Pułapki w prawdziwych partiach: dla każdej pułapki `{local, lichess}` z `total`, `fell`, `fell_pct`, `score_after_bad`, `score_overall` (wynik z naszej perspektywy). |
+| `GET /api/search/{id}/real` | Pułapki w prawdziwych partiach: dla każdej pułapki `{local, lichess}` z `total`, `fell`, `fell_pct`, `fell_ci`, `score_after_bad`, `score_ci`, `score_overall`, `small` (95% przedziały Wilsona; wynik z naszej perspektywy). |
+| `POST /api/opponent/load` `{source, name, max_games}`, `GET /api/opponent/status`, `GET /api/opponents`, `DELETE /api/opponent/{key}` | Wczytywanie partii przeciwnika w tle i lista książek. |
 | `GET/POST /api/search/{id}/marks` | Gwiazdki i notatki: `{key: {star, note}}`, klucz `rodzaj:uci,uci,…`. |
 | `POST /api/search/{id}/chapters_pgn` | Rozdziały eksportu jako PGN (tekst). |
 | `POST /api/search/{id}/lichess_study` | Eksport do studium (nowego lub istniejącego). |
 | `GET /api/lichess/token` | Ważność i uprawnienia tokenu, link do utworzenia tokenu ze `study:write`. |
-| `GET /api/status`, `POST /api/settings` | Stan silnika, bazy, Maii, Lichess; zapis tokenu. |
+| `GET /api/status`, `POST /api/settings` | Stan silnika, bazy, modelu (`human_model`, `maia3_installed`), Lichess, kolejki; zapis tokenu i wyboru modelu. |
 | `POST /api/pick_file`, `/api/engine`, `/api/database[/build|/cancel|/clear]` | Ustawienia silnika i bazy. |
 
 Ciało eksportu (`chapters_pgn`, `lichess_study`):
@@ -235,6 +290,9 @@ Podział na rozdziały robi interfejs (te same rodziny co na liście), a serwer 
 | `data/lichess.sqlite` | Cache explorera (`url → body`). |
 | `data/searches/<id>.json` | Wyniki (pkt 4). |
 | `data/marks.json` | `{id wyszukiwania: {klucz: {star, note}}}`. |
+| `data/calibration.json` | `{"model|elo_min-elo_max": [[Σ przewidziany, Σ faktyczny, n] × 10 przedziałów]}`. |
+| `data/opponents/<źródło>-<nick>.json` | `{meta, positions: {epd: [n, {uci: [ile, suma wyników]}]}}`. |
+| `models/maia3/` | Cache Hugging Face z wagami Mai-3. |
 | `models/maia2/` | Wagi Maia-2. |
 
 ## 10. Testowanie i wydania

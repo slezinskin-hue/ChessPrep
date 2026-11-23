@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import io
 import json
+import math
+import time
 from dataclasses import fields
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from . import databases as db_mod
 from . import engine as engine_mod
 from . import explorer as explorer_mod
 from . import human as human_mod
+from . import opponent as opponent_mod
 from .config import CONFIG, DATA_DIR, WEB_DIR
 from . import search as search_mod
 from . import study as study_mod
@@ -158,9 +161,25 @@ def analyse(fen: str, depth: int = 16, multipv: int = 3):
         {**l.as_dict(), "san": _san_pv(b, l.pv), "es_white": round(l.es(chess.WHITE), 3)} for l in lines]}
 
 
+def _history_boards(hist_fen: str, hist_moves: str) -> list[chess.Board]:
+    """Poprzednie pozycje (dla Mai-3) z pozycji startowej i listy ruchów UCI."""
+    if not hist_fen:
+        return []
+    try:
+        b = chess.Board(hist_fen)
+        out = []
+        for u in [m for m in hist_moves.split(",") if m]:
+            out.append(b.copy(stack=False))
+            b.push(chess.Move.from_uci(u))
+        return out[-8:]
+    except (ValueError, AssertionError):
+        return []
+
+
 @app.get("/api/stats")
 def stats(fen: str, elo_min: int = 1600, elo_max: int = 2000, lichess: bool = True,
-          speeds: str = "blitz,rapid,classical", maia: bool = True, source: str = "players"):
+          speeds: str = "blitz,rapid,classical", maia: bool = True, source: str = "players",
+          hist_fen: str = "", hist_moves: str = "", opponent: str = ""):
     b = _board(fen)
     st = explorer_mod.shared()
     out: dict = {"local": st.local_query(b, elo_min, elo_max)}
@@ -168,10 +187,18 @@ def stats(fen: str, elo_min: int = 1600, elo_max: int = 2000, lichess: bool = Tr
         out["lichess"] = st.lichess_query(b, elo_min, elo_max, speeds.split(","), source)
         out["lichess_error"] = st.lichess.error
     if maia:
-        probs = human_mod.shared().probs(b, elo_min, elo_max)
+        hm = human_mod.shared()
+        probs = hm.probs(b, elo_min, elo_max, _history_boards(hist_fen, hist_moves))
         out["maia"] = [{"uci": u, "san": b.san(chess.Move.from_uci(u)), "p": round(p, 4)}
                        for u, p in list(probs.items())[:12]]
-        out["maia_error"] = human_mod.shared().error
+        out["maia_error"] = hm.error
+        out["human_model"] = hm.label
+    book = opponent_mod.shared().get(opponent) if opponent else None
+    if book is not None:
+        n, moves = book.at(b)
+        out["opponent"] = {"name": book.meta["name"], "reached": n, "moves": [
+            {"uci": u, "san": b.san(chess.Move.from_uci(u)), "games": m[0], "score": round(m[1] / m[0], 2)}
+            for u, m in sorted(moves.items(), key=lambda kv: -kv[1][0]) if b.is_legal(chess.Move.from_uci(u))]}
     for src in ("local", "lichess"):
         if src in out:
             for m in out[src]["moves"]:
@@ -193,12 +220,14 @@ def search_start(req: SearchReq):
     allowed = {f.name for f in fields(SearchParams)}
     params = SearchParams(**{k: v for k, v in req.params.items() if k in allowed})
     _board(params.fen)
+    if params.deadline and params.deadline < time.time() + search_mod.MIN_TIME_LEFT:
+        raise HTTPException(400, "Godzina końca musi być co najmniej 5 minut od teraz")
     job = jobs.start(params)
     return job.info()
 
 
 @app.get("/api/search/{job_id}")
-def search_status(job_id: str):
+def search_status(job_id: str, partial: bool = False):
     job = jobs.jobs.get(job_id)
     if job is None:
         res = jobs.load(job_id)
@@ -208,6 +237,11 @@ def search_status(job_id: str):
     info = job.info()
     if job.status in ("done", "cancelled") and job.result is not None:
         info["result"] = job.result
+    elif job.status == "running":
+        f = jobs.dir / f"{job_id}.json"
+        info["partial_available"] = f.exists()
+        if partial and f.exists():
+            info["result"] = json.loads(f.read_text(encoding="utf-8"))
     return info
 
 
@@ -215,7 +249,16 @@ def search_status(job_id: str):
 def search_cancel(job_id: str):
     job = jobs.jobs.get(job_id)
     if job:
-        job.cancel.set()
+        jobs.cancel(job)
+    return {"ok": True}
+
+
+@app.post("/api/search/{job_id}/finish")
+def search_finish(job_id: str):
+    """Zakończ szukanie teraz, ale zweryfikuj wyniki."""
+    job = jobs.jobs.get(job_id)
+    if job:
+        job.finish.set()
     return {"ok": True}
 
 
@@ -224,6 +267,14 @@ def searches():
     running = [j.info() | {"fen": j.params.fen, "color": j.params.color}
                for j in jobs.jobs.values() if j.status in ("queued", "running")]
     return {"running": running, "saved": jobs.saved()}
+
+
+@app.get("/api/queue")
+def queue():
+    """Wyszukiwania czekające w kolejce (w kolejności uruchamiania)."""
+    return {"queued": [{"id": j.id, "color": j.params.color, "budget": j.params.budget,
+                        "deadline": j.params.deadline or None, "elo": f"{j.params.elo_min}-{j.params.elo_max}"}
+                       for j in jobs.queued()]}
 
 
 @app.delete("/api/search/{job_id}")
@@ -344,10 +395,26 @@ def _real_source(r: dict, bad: set[str], white: bool) -> dict | None:
         mine = w if white else bl
         return n, round((mine + d / 2) / n, 3)
 
-    fell, after_bad = score([m for m in moves if get(m, "uci") in bad])
+    bad_moves = [m for m in moves if get(m, "uci") in bad]
+    fell, after_bad = score(bad_moves)
     _, overall = score(moves)
-    return {"total": r["total"], "fell": fell, "fell_pct": round(fell / r["total"], 3),
-            "score_after_bad": after_bad, "score_overall": overall}
+    out = {"total": r["total"], "fell": fell, "fell_pct": round(fell / r["total"], 3),
+           "fell_ci": wilson(fell, r["total"]), "score_after_bad": after_bad, "score_overall": overall,
+           "small": r["total"] < 20}
+    if fell and after_bad is not None:
+        out["score_ci"] = wilson(after_bad * fell, fell)
+    return out
+
+
+def wilson(k: float, n: int, z: float = 1.96) -> list[float] | None:
+    """95% przedział ufności Wilsona dla odsetka k/n."""
+    if not n:
+        return None
+    p = k / n
+    den = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / den
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
+    return [round(max(0.0, c - h), 3), round(min(1.0, c + h), 3)]
 
 
 @app.get("/api/search/{job_id}/real")
@@ -431,7 +498,12 @@ def _chapters(job_id: str, req: ExportReq) -> list[dict]:
     if req.kind not in ("traps", "hard", "nov"):
         raise HTTPException(400, "Zły rodzaj eksportu")
     notes = {int(k): v for k, v in (req.notes or {}).items() if v}
-    return study_mod.build_chapters(_result(job_id), req.kind, req.groups, req.prefix, notes)
+    res = _result(job_id)
+    prefix = req.prefix
+    pr = res.get("params", {})
+    if pr.get("pre_fen"):  # historia zapisana z wyszukiwaniem ma pierwszeństwo
+        prefix = {"start_fen": pr["pre_fen"], "moves": pr.get("pre_moves") or []}
+    return study_mod.build_chapters(res, req.kind, req.groups, prefix, notes)
 
 
 @app.post("/api/search/{job_id}/chapters_pgn", response_class=PlainTextResponse)
@@ -487,14 +559,19 @@ def status():
         "index_available": st.local.available,
         "lichess_token": bool(st.lichess.token),
         "lichess_error": st.lichess.error,
-        "maia_loaded": maia._model is not None,
+        "maia_loaded": maia.loaded,
         "maia_error": maia.error,
+        "human_model": maia.label,
+        "human_model_setting": CONFIG.get("human_model", "auto"),
+        "maia3_installed": human_mod.maia3_installed(),
         "search_running": _search_running(),
+        "queued": len(jobs.queued()),
     }
 
 
 class SettingsReq(BaseModel):
     lichess_token: str | None = None
+    human_model: str | None = None
 
 
 @app.post("/api/settings")
@@ -504,6 +581,50 @@ def settings(req: SettingsReq):
         config_mod.save_local({"lichess_token": token})
         CONFIG["lichess_token"] = token
         explorer_mod.shared().lichess.token = token
+    if req.human_model is not None:
+        name = req.human_model.strip().lower()
+        if name != "auto" and name not in human_mod.MODELS:
+            raise HTTPException(400, "Nieznany model")
+        if _search_running():
+            raise HTTPException(409, "Trwa wyszukiwanie - zmień model po jego zakończeniu")
+        config_mod.save_local({"human_model": name})
+        CONFIG["human_model"] = name
+    return {"ok": True, "human_model": human_mod.shared().label}
+
+
+# ------------------------------------------------------------------ przeciwnik
+
+class OpponentReq(BaseModel):
+    source: str
+    name: str
+    max_games: int = 2000
+
+
+@app.post("/api/opponent/load")
+def opponent_load(req: OpponentReq):
+    try:
+        opponent_mod.shared().start(req.source, req.name, max(50, min(10000, req.max_games)))
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc))
+    return opponent_mod.shared().status()
+
+
+@app.get("/api/opponent/status")
+def opponent_status():
+    return opponent_mod.shared().status()
+
+
+@app.get("/api/opponents")
+def opponents():
+    return {"books": opponent_mod.shared().list(), "sources": opponent_mod.SOURCES}
+
+
+@app.delete("/api/opponent/{key}")
+def opponent_delete(key: str):
+    try:
+        opponent_mod.shared().delete(key)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     return {"ok": True}
 
 

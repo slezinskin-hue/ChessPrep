@@ -61,18 +61,52 @@
         <label>Głębokość wariantu (półruchy)
           <input id="p-plies" type="number" min="2" max="30" value="12">
         </label>
+        <label>Szukaj
+          <select id="p-mode">
+            <option value="budget">określoną liczbę pozycji</option>
+            <option value="time">do godziny</option>
+          </select>
+        </label>
+        <label id="lbl-budget">Liczba analizowanych pozycji <input id="p-budget" type="number" min="10" max="20000" value="120"></label>
+        <label id="lbl-deadline" class="hidden" title="Program sam zostawi czas na weryfikację wyników">Skończ o
+          <input id="p-deadline" type="time" value="15:00">
+        </label>
+        <details id="opp-box">
+          <summary>Przeciwnik (opcjonalnie)</summary>
+          <p class="muted small">Wczytaj partie konkretnego gracza – w jego pozycjach program weźmie pod uwagę jego własne ruchy,
+            a przy pułapkach pokaże, czy już w nie wpadał.</p>
+          <label>Źródło
+            <select id="opp-source">
+              <option value="lichess">Lichess</option>
+              <option value="chesscom">chess.com</option>
+              <option value="local">baza lokalna (nazwisko jak w PGN)</option>
+            </select>
+          </label>
+          <label>Nick / nazwisko <input id="opp-name" placeholder="np. nick z Lichess"></label>
+          <label>Maks. partii <input id="opp-max" type="number" min="50" max="10000" step="50" value="2000"></label>
+          <div class="row left"><button type="button" id="btn-opp-load">Wczytaj partie</button></div>
+          <div id="opp-status" class="small muted"></div>
+          <label>Szukaj pod przeciwnika
+            <select id="p-opponent"><option value="">— nikogo —</option></select>
+          </label>
+        </details>
         <details>
           <summary>Zaawansowane</summary>
-          <label>Liczba analizowanych pozycji <input id="p-budget" type="number" min="10" max="2000" value="120"></label>
           <label>Głębokość silnika <input id="p-depth" type="number" min="8" max="30" value="16"></label>
+          <label title="Gałęzie, do których przeciwnik dochodzi rzadko (poniżej 1%), liczone są płycej – do tej głębokości przy 0,1%. Równa głębokości silnika = wyłączone.">Głębokość dla mało prawdopodobnych gałęzi <input id="p-depth-min" type="number" min="6" max="30" value="14"></label>
           <label>Głębokość weryfikacji <input id="p-vdepth" type="number" min="10" max="34" value="21"></label>
           <label>Maks. strata vs najlepszy ruch (pion) <input id="p-drop" type="number" step="0.1" value="1.2"></label>
           <label>Moje kandydaty (MultiPV) <input id="p-cands" type="number" min="1" max="8" value="4"></label>
           <label>Odpowiedzi przeciwnika (maks.) <input id="p-replies" type="number" min="1" max="8" value="4"></label>
           <label>Pokrycie odpowiedzi przeciwnika <input id="p-cover" type="number" step="0.05" min="0.3" max="1" value="0.85"></label>
+          <div class="sub">Ranking i różnorodność</div>
+          <label title="Pułapki, do których przeciwnik dochodzi rzadziej, idą na koniec listy jako „rzadkie dojście”">Min. szansa dojścia pułapki (%) <input id="p-min-reach" type="number" step="0.1" min="0" value="0.2"></label>
+          <label title="Tyle wyników z jednej rodziny wariantów (wspólne 4 półruchy), zanim pokażemy kolejne z niej">Wyników z jednej rodziny na początku listy <input id="p-fam-quota" type="number" min="0" max="50" value="4"></label>
+          <label title="Jedna rodzina wariantów (pierwszy ruch i odpowiedź) nie zabierze więcej budżetu – szukanie nie „zanurkuje” w jedną linię">Maks. udział rodziny w budżecie (%) <input id="p-fam-share" type="number" min="10" max="100" value="50"></label>
           <div class="sub">Nowinki</div>
           <label title="O ile nowinka może być gorsza od najlepszego ruchu silnika">Maks. strata vs silnik (pion) <input id="p-nov-loss" type="number" step="0.1" min="0" value="0.5"></label>
-          <label title="Ruch grany najwyżej tyle razy uznajemy za rzadki">„Rzadko” = maks. partii <input id="p-nov-games" type="number" min="0" value="10"></label>
+          <label title="Ruch grany najwyżej tyle razy to nowinka (N), 0 partii = TN">„Nowinka” = maks. partii <input id="p-nov-games" type="number" min="0" value="10"></label>
+          <label title="Ruch z takim lub mniejszym udziałem w partiach z tej pozycji to „rzadki wariant”, nawet jeśli w dużej bazie ma sporo partii">„Rzadki wariant” = maks. udział (%) <input id="p-nov-share" type="number" step="0.5" min="0" max="20" value="2"></label>
           <label title="Nowinki szukamy tylko w pozycjach z co najmniej tyloma partiami">„Teoria” = min. partii <input id="p-theory" type="number" min="1" value="50"></label>
           <div class="sub">Trudne momenty</div>
           <label title="Trudny moment = co najmniej tyle % ludzi się tu myli">Min. % błędów <input id="p-hard-err" type="number" min="5" max="95" value="25"></label>
@@ -97,9 +131,12 @@
         </details>
         <div class="row">
           <button id="btn-search" class="primary">Szukaj</button>
-          <button id="btn-cancel" class="danger hidden">Przerwij</button>
+          <button id="btn-finish" class="hidden" title="Zakończ szukanie teraz, ale zweryfikuj najlepsze wyniki">Zakończ i zweryfikuj</button>
+          <button id="btn-cancel" class="danger hidden" title="Przerwij od razu, bez weryfikacji">Przerwij</button>
         </div>
         <div id="job" class="job muted small"></div>
+        <div id="job-queue" class="small muted"></div>
+        <div class="row left"><button id="btn-partial" class="ghost small hidden" title="Wyniki zapisane w trakcie szukania (bez weryfikacji)">Pokaż wyniki częściowe</button></div>
       </div>
     </div>
 
@@ -160,6 +197,19 @@
       <p class="muted small">Po wybraniu nowej bazy indeks buduje się sam w tle (przy ~17 mln partii około 2 godzin; można przerwać
         i później wznowić). W tym czasie aplikacja działa normalnie, tylko bez statystyk z tej bazy.
         Indeksy wcześniej używanych baz są zachowywane.</p>
+    </section>
+
+    <section>
+      <h4>Model ludzkich ruchów</h4>
+      <label>Model
+        <select id="set-human">
+          <option value="auto">automatycznie (Maia-3, jeśli zainstalowana)</option>
+          <option value="maia2">Maia-2 (rankingi do 2000)</option>
+          <option value="maia3-5m">Maia-3 5M (600–2600, szybka)</option>
+          <option value="maia3-23m">Maia-3 23M (dokładniejsza, wolniejsza)</option>
+        </select>
+      </label>
+      <div id="set-human-info" class="small muted"></div>
     </section>
 
     <section>
