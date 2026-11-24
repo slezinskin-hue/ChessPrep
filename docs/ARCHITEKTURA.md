@@ -51,10 +51,11 @@ run.py ──► okno pywebview ──► http://127.0.0.1:8777 (uvicorn + FastA
 |---|---|
 | `__init__.py` | `__version__`, wstrzyknięcie `truststore` (systemowe certyfikaty, np. gdy antywirus skanuje HTTPS). |
 | `config.py` | `CONFIG`, `ROOT`, `DATA_DIR`, `WEB_DIR`, `load()`, `save_local()`. |
-| `engine.py` | `Engine`: UCI przez python-chess, `analyse(board, depth, multipv, moves=None)` zwraca listę `Line` (cp z perspektywy **białych**, WDL, pv). Pamięć ocen w `data/evals/<hash silnika>.sqlite`, klucz: EPD + ograniczenie ruchów (`root`); zapis z większą głębokością lub MultiPV obsłuży też płytsze zapytania. `resolve_engine_path()`, `probe()`, `set_engine()`. Bez okna konsoli (`CREATE_NO_WINDOW`). |
-| `human.py` | Model ludzkich ruchów: `Maia` (Maia-2, rankingi 1100–2000) i `Maia3` (pakiet `maia3`, 600–2600, historia 7 pozycji, głowica W/D/L). `shared()` wybiera wg `human_model` („auto” = Maia-3, jeśli zainstalowana). Gdy Maia-3 nie
-da się załadować, `Maia3` przekazuje zapytania do Mai-2 (`fallback`), a błąd pokazuje w statusie. `probs(board, elo_min, elo_max, history)` – średnia z ≤ 4 punktów Elo w zakresie, cache LRU. |
-| `calibration.py` | Krzywa „przewidywany odsetek błędów → faktyczny” (`Calibration.apply`), punkt startowy z pomiaru 23.11.2026, douczana z każdego szukania (`data/calibration.json`, osobno dla modelu i przedziału rankingu). |
+| `engine.py` | `Engine`: UCI przez python-chess, `analyse(board, depth, multipv, moves=None)` zwraca listę `Line` (cp z perspektywy **białych**, WDL, pv). Pamięć ocen w `data/evals/<hash silnika>.sqlite`, klucz: EPD + ograniczenie ruchów (`root`); zapis z większą głębokością lub MultiPV obsłuży też płytsze zapytania. `exact=True`: wynik dokładnie z tej głębokości (czysta pamięć silnika, osobny zapis). `shallow()`: drugi, mały proces silnika do płytkich analiz. `resolve_engine_path()`, `probe()`, `set_engine()`. Bez okna konsoli (`CREATE_NO_WINDOW`). |
+| `human.py` | Model ludzkich ruchów: `Maia` (Maia-2, rankingi 1100–2000) i `Maia3` (pakiet `maia3`, 600–2600, historia 7 pozycji, głowica W/D/L). `shared()` wybiera wg `human_model` („auto” = Maia-3, jeśli zainstalowana). Gdy zakres rankingu sięga ponad 2600 (dane treningowe Mai-3), Maia-3 dostaje punkty z górnych 200 (np. 2000–3300 → 2400/2500/2600) – lepiej przewiduje ruchy silnej populacji. Gdy Maia-3 nie da się załadować, `Maia3` przekazuje zapytania do Mai-2 (`fallback`), a błąd pokazuje w statusie. `probs(board, elo_min, elo_max, history)` – średnia z ≤ 4 punktów Elo w zakresie, cache LRU. |
+| `calibration.py` | Krzywa „przewidywany odsetek błędów → faktyczny” (`Calibration.apply(pred, klasa)`): pomiar na bazie, dane z wyszukiwań albo krzywa startowa (pkt 3, „Krzywa kalibracji”); `data/calibration.json`, klucz `model|źródło|ranking`. |
+| `calibrate_db.py` | Zadanie „Kalibruj model”: pomiar na losowych pozycjach z partii z lokalnej bazy (pkt 3). |
+| `updates.py` | Sprawdzanie i instalowanie aktualizacji Mai-2 / Mai-3 (pkt 3). |
 | `opponent.py` | Przeciwnik: pobieranie partii (Lichess `/api/games/user`, chess.com archiwa miesięczne, lokalny PGN po tagu White/Black), „książka” = pozycje, w których był na ruchu (`epd → [n, {uci: [ile, suma wyników]}]`), `Loader` w tle, `Book.dist/info`. |
 | `dbindex.py` | Indeks bazy PGN (pkt 7): budowa (`build`, CLI) i odczyt (`GameIndex.query`). |
 | `databases.py` | Wybór aktywnej bazy, katalog indeksu dla pliku, `IndexManager`: budowa w podprocesie z logiem, postęp z parsowania logu, przerwanie (`taskkill /T`), wznawianie. |
@@ -73,20 +74,52 @@ Plik `search.py`; opis jest też w docstringu modułu.
   `loss ≥ MISTAKE (0.10)` oznacza błąd.
 * **error**: masa prawdopodobieństwa (wg `HumanPolicy`) ruchów-błędów. Gdy drugi najlepszy ruch
   silnika jest już błędem, wszystkie nieocenione ruchy też są błędami i ich masa się dolicza.
-  W pozycjach z < 30 partiami error jest **kalibrowany** (`calibration.py`), ale tylko jego część
-  z modelu: `error' = error − w·(err_model − apply(err_model))`, `w = 25/(N+25)` (waga modelu
-  w `HumanPolicy`), `err_model` = masa złych ruchów wg samego modelu. p złych ruchów skalujemy do
-  `error'`, p dobrych odpowiednio w górę. `err_raw` = przed kalibracją.
+  error jest **kalibrowany** (`calibration.py`), ale tylko jego część z modelu:
+  `error' = error − w·(err_model − apply(err_model, klasa))`, `w = 25/(N+25)` (waga modelu
+  w `HumanPolicy`, więc przy wielu partiach poprawka znika sama), `err_model` = masa złych ruchów
+  wg samego modelu (z resztą nieocenionych ruchów, gdy są błędami – ta sama definicja co przy
+  zbieraniu danych). `klasa` = `shallow` (silnik widzi błąd do głębokości 6) / `deep` / brak.
+  p złych ruchów skalujemy do `error'`, p dobrych odpowiednio w górę. `err_raw` = przed kalibracją.
+* **Krzywa kalibracji** (`Calibration`, klucz `model|źródło|ranking`, np. `maia3-5m|local+masters|2000-3200`):
+  1. pomiar na bazie (zadanie „Kalibruj model”, ≥ 200 pozycji, osobne krzywe dla klas) – tylko gdy
+     szukanie porównuje z partiami klasycznymi (`local` sama albo z `masters`); ten sam przedział
+     rankingu, a bez niego pomiar tego samego modelu o najbardziej pokrywającym się zakresie (≥ połowa);
+  2. dane z wyszukiwań (pozycje z ≥ 30 partiami, każda pozycja raz – `seen` w pliku), ściągane do
+     krzywej startowej z siłą 10 pozycji na przedział (`fit`); przedziały bez danych skalowane średnią
+     z przedziałów ≥ 10% (gdy mają ≥ 20 pozycji), bo 0–10% to teoria;
+  3. krzywa startowa: od `PRIOR` (Maia-2 / gracze Lichess) do `PRIOR_STRONG` (~1/3 przewidywania)
+     płynnie wg rankingu 1800–2200; populacja online (gracze Lichess) liczy się w połowie.
+  Bez pomiaru klasa `shallow` dostaje 0,6 × krzywa ogólna (`SHALLOW_FACTOR`). Krzywa jest
+  niemalejąca i nigdy nie podnosi przewidywania. W trakcie szukania krzywa się nie zmienia; w
+  `results()` (także zapis częściowy) `_recalibrate` dolicza dane z tego szukania i przelicza
+  wszystkie pozycje przeciwnika ostateczną krzywą – bez silnika (oceny i p modelu są w węzłach,
+  `cal_ver`). Klucze sprzed 0.6 (`model|ranking`) są przenoszone przy pierwszym odczycie.
 * **trick** (na kartach „siła”): oczekiwana strata przeciwnika, Σ p(m)·loss(m) po błędach.
-* **reach** (dojście): szansa dotarcia do pozycji. Po transpozycjach: maksimum po drogach przez
-  nasze ruchy (to alternatywy), suma po drogach przez ruchy przeciwnika (`compute_reach`).
+* **reach** (dojście): szansa dotarcia do pozycji przy naszej najlepszej strategii. Bez
+  transpozycji to iloczyn p ruchów przeciwnika. Przy transpozycjach drogi różniące się kolejnością
+  NASZYCH ruchów są alternatywami (zagramy jedną), a sumują się tylko drogi różniące się ruchami
+  przeciwnika – w tej samej pozycji mogą się mieszać oba rodzaje, więc dla węzłów, które trafiają
+  do wyników, `compute_reach` liczy dojście dokładnie (`_exact_reach`: programowanie dynamiczne po
+  przodkach, na naszym ruchu max, na ruchu przeciwnika Σ p·wartość). W trakcie szukania (priorytet,
+  głębokość silnika) przy transpozycji bierzemy maksimum po drogach – nigdy zawyżone.
+  Do 0.5.0 drogi były sumowane, co zawyżało dojście średnio ~3× (przegląd 24.11.2026).
 * **ev**: oczekiwany wynik (szansa wygranej z naszej perspektywy) – expectimax: na ruchu
   przeciwnika Σ p(m)·ev(dziecko) (dla nierozwiniętych – szansa z oceny), na naszym ruchu max.
-  **gain** = ev − szansa przy najlepszej obronie (karta: „zysk”), **per100** = reach·gain·100.
+  **gain** = ev − szansa przy najlepszej obronie (karta: „zysk”), **per100** = reach·gain·100,
+  **line_net** (karta: „netto”) – dla PIERWSZEGO odejścia od najlepszego ruchu silnika na drodze:
+  100·dojście(miejsca odejścia)·(ev po naszym ruchu − max(szansa przy najlepszym ruchu, ev po nim)).
+  Jedno odejście „kupuje” wszystkie pułapki pod nim, więc to ocena linii, nie pojedynczej pułapki.
 * **cost**: Σ po naszych ruchach na ścieżce (najlepszy ruch silnika − wybrany), w cp; obie oceny
   z tej samej analizy MultiPV (`edge_cp`), więc weryfikacja na większej głębokości ich nie miesza.
 * **hidden_depth**: najmniejsza głębokość z (2, 4, …, 16), na której silnik widzi, że najczęstszy
   zły ruch jest błędem (porównanie z najlepszym dobrym ruchem, MultiPV 2). `hidden` = > 6.
+  Liczona osobnym małym procesem silnika (`engine.shallow()`: 1 wątek, 16 MB) z `exact=True`:
+  przed każdą analizą `ucinewgame` (czysta tablica transpozycji) i osobny zapis w pamięci ocen
+  (`root = "@głębokość|…"`) – inaczej płytka analiza dostawałaby wyniki wcześniejszych głębokich.
+  W trakcie szukania sprawdzana do głębokości 10 (`QUICK_HIDDEN`) dla każdej pozycji z `err_raw ≥ 8%`
+  (`hidden_checked`; `hidden_depth = None` = nie widać do `hidden_max`), przy weryfikacji – do 16.
+  **confidence** (karta): `games` (≥ 30 partii), `hidden`, `shallow` (sam model, a błąd widać
+  od razu – silni gracze rzadko go popełniają), `model` (nie sprawdzano).
 
 ### HumanPolicy
 `p(m) = (games(m) + 25·model(m)) / (N + 25)`, gdzie `games` to suma partii z lokalnej bazy
@@ -103,8 +136,11 @@ przeciwnika, w jego pozycjach (na ruchu jest przeciwnik): `p = (1−λ)·p + λ�
 * **Ruch przeciwnika** (`_expand_opponent` → `_score_opponent`): płytki przegląd (MultiPV 3,
   głębokość −4), potem kandydaci = ruchy ludzi do pokrycia `opp_coverage` (+ top silnika)
   oceniani **jednym** MultiPV z `searchmoves`. Dla błędów zapisujemy `pv` (kara, ≤ 9 półruchów).
-  Do drzewa idą dobre ruchy (najwyżej `opp_max_replies`) oraz najlepszy ruch. Pozycje z ≥ 100
+  Do drzewa idą dobre ruchy (najwyżej `opp_max_replies`) oraz najlepszy ruch. Pozycje z ≥ 30
   partiami zasilają kalibrację (przewidziany vs faktyczny odsetek złych ruchów).
+* **Mniej zapytań o partie** (`_skip_sources`): gdy każda poprzednia pozycja w drzewie ma 0 partii na
+  Lichess, tej nie pytamy (`lichess_skipped`; wyjątek – transpozycja spoza drzewa – dla wyników
+  dopytuje `_fill_rarity`). Baza lokalna jest pytana zawsze (memmap, ułamek ms).
 * **Głębokość silnika** (`node_depth`): `depth` przy dojściu ≥ 1%, `depth_min` przy ≤ 0,1%,
   pomiędzy – interpolacja logarytmiczna.
 * **Transpozycje** (`_add_child`): tablica `(epd, ply) → węzeł`; ta sama pozycja po tej samej
@@ -118,7 +154,9 @@ przeciwnika, w jego pozycjach (na ruchu jest przeciwnik): `p = (1−λ)·p + λ�
   ruch, ucieczka z szacha przy ≤ 3 ruchach, odbicie, dobry ruch z modelem ≥ `obvious_p`.
 
 ### Kolejność (best-first)
-Priorytet = √(dojście warunkowe · dojście). Warunkowe zakłada dobrą obronę (p(m)/p(dobre)) –
+Priorytet = √(dojście warunkowe · dojście). Co 5 min (`QUEUE_REACH_EVERY`) nierozwinięte pozycje
+z transpozycjami dostają dokładne dojście (`_refresh_queue`) – maksimum po drogach zaniża pozycje
+osiągalne różnymi ruchami przeciwnika. Warunkowe zakłada dobrą obronę (p(m)/p(dobre)) –
 dzięki temu po trudnym momencie linia jest rozwijana dalej; bezwarunkowe nie pozwala zejść
 głęboko w linie, do których nikt nie dojdzie. Do tego limit `family_share` (domyślnie 50%)
 budżetu na jedną rodzinę (pierwszy ruch + odpowiedź): po przekroczeniu węzeł wraca do kolejki
@@ -147,10 +185,37 @@ wyjmuje je z kolejki. Wyszukiwanie „do godziny”, które wychodzi z kolejki, 
   wariant, poza_teorią = 1,15 gdy po nowince nie ma partii.
 * **Limity**: pułapki `max(40, min(300, analysed/8))`, linie i nowinki `max(30, min(150, analysed/16))`.
 * **Weryfikacja** (`results(verify=True)`): ok. 20% najlepszych (pułapki 10–60, linie 8–25,
-  nowinki 10–25): nasze ruchy na ścieżce na `verify_depth` (spadek poniżej progu → gałąź
-  odcięta), a w pułapkach i momentach `reverify_opponent`: dobre i złe ruchy jeszcze raz jednym
-  MultiPV na `verify_depth` – gdy błąd przestał być błędem, węzeł jest `refuted`; potem głębokość
-  ukrycia. W trybie do godziny weryfikacja kończy się najpóźniej 5 min po `deadline`.
+  nowinki 10–25), **na przemian** pułapka → linia → nowinka według rankingu (gdy skończy się czas,
+  każda grupa ma sprawdzone swoje najlepsze): nasze ruchy na ścieżce na `verify_depth` (spadek
+  poniżej progu → gałąź odcięta), a w pułapkach i momentach `reverify_opponent`: dobre i złe ruchy
+  jeszcze raz jednym MultiPV na `verify_depth` – gdy błąd przestał być błędem, węzeł jest
+  `refuted`; potem głębokość ukrycia. W trybie do godziny weryfikacja kończy się najpóźniej 5 min
+  po `deadline` (czas sprawdzany też w środku wyniku; przerwany wynik nie liczy się jako sprawdzony).
+  `stats.verified`: liczby sprawdzonych, `planned`, `interrupted`, `cut` (pozycje odcięte po naszych
+  ruchach). Przed weryfikacją `compute_reach(reparent=True)` ustawia linię każdego wyniku na
+  kolejność naszych ruchów, której dotyczy dokładne dojście (`_follow_best`; bez węzłów z nowinką). `stats.budget_split`: pierwsze ruchy przeciwnika – udział w partiach
+  i w przeanalizowanych pozycjach.
+
+### Kalibracja na bazie (`calibrate_db.py`)
+Zadanie w tej samej kolejce co wyszukiwania (`CalibParams`, `kind = "calibration"`). Losuje
+partie z pliku PGN aktywnej bazy (losowe miejsce w pliku → następna partia), w nich półruch
+16–60; gracz na ruchu musi mieć ranking z zakresu, pozycja < 30 partii w indeksie (poza teorią).
+Wymaga gotowego indeksu. Dla pozycji: Maia (z 7 poprzednimi pozycjami), kandydaci jak w szukaniu
+(ruchy modelu do `opp_coverage`, ≤ `opp_max_replies + 2`, + 3 najlepsze z płytkiego przeglądu na
+`depth − 4`), MultiPV z kandydatami i zagranym ruchem na `depth` (14). Przewidywany błąd liczony
+jak `err_model` w szukaniu (tylko kandydaci); faktyczny = czy zagrany ruch to błąd. Klasa ukrycia
+jak w szukaniu (do głębokości 10).
+Wynik dopisywany (sumowany z poprzednimi) do `calibration.json` → `measured` → `model|ranking`.
+
+### Aktualizacje modeli (`updates.py`)
+Okno przy starcie pyta `GET /api/updates`: commit zainstalowanej Mai-3 (`direct_url.json`) vs
+GitHub (z datą i opisem commita), SHA-256 pobranych wag `.pt` vs Hugging Face (`?blobs=true`),
+Maia-2 vs PyPI. Nic nie instaluje się samo: Maia-3 ładuje wagi z dysku (`local_files_only`).
+`POST /api/updates` przyjmuje tylko identyfikatory z ostatniego sprawdzenia: wagi pobiera od razu
+(`human.reset_shared()`), a dla paczek robi suchy przebieg pip (`--dry-run --report`, widać np.
+zmianę torcha) i zapisuje `models/pending-update.json`. Instalacja (`run_pending`) odbywa się przy
+następnym uruchomieniu w `run.py`, zanim załaduje się torch; Maia-3 z przypiętego commita. Wynik
+trafia do `models/update-result.json` i okno pokazuje go raz. `DELETE /api/updates/pending` anuluje.
 
 ## 4. Format wyników
 
@@ -299,6 +364,9 @@ Podział na rozdziały robi interfejs (te same rodziny co na liście), a serwer 
 
 * Interfejs najwygodniej sprawdzać przez `run.py --server` i przeglądarkę (port 8777). Panel
   podglądu w trakcie pracy używa portu 8778 (`.claude/launch.json` w folderze nadrzędnym).
+* Testy regresji (bez silnika i Mai, z tymczasowym plikiem kalibracji):
+  `.venv\Scripts\python tests\test_reach_calib.py` – dojście przy transpozycjach (też po odcięciu
+  i w kolejce), pomijanie zapytań, `fit`, krzywa startowa, migracja, duplikaty, pomiar na bazie.
 * Szybkie testy: otwórz zapisane wyszukiwanie i sprawdź zakładki, rodziny, filtry, karę
   („jak ukarać?”), statystyki „w partiach” i eksport („Kopiuj PGN” działa bez Lichess).
 * PGN eksportu można sprawdzić bez sieci: `study.build_chapters(result, "traps", groups, prefix)`

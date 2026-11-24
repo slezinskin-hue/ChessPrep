@@ -200,3 +200,11 @@ dialog.export-open { min-width: 520px; }
 #opp-box > summary { cursor: pointer; color: var(--muted); }
 #opp-box p { margin: 4px 0; }
 .qitem { margin-right: 8px; white-space: nowrap; }
+
+.banner { background: #2b3a52; border-bottom: 1px solid #3d5476; padding: 6px 14px; font-size: 13px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.banner.hidden { display: none; }
+.tag.warn { background: #d9a44133; color: #f0c674; border: 1px dashed #f0c67466; }
+.tag.okish { background: #4caf5026; color: #9ad69c; }
+.calib-tbl { border-collapse: collapse; margin-top: 4px; }
+.calib-tbl td, .calib-tbl th { padding: 1px 8px; text-align: right; }
+label.inline { display: inline-flex; gap: 6px; align-items: center; }

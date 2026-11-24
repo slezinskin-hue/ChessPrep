@@ -219,6 +219,8 @@ async function loadStats(fen) {
     else if (r.local.beyond_index) notes.push("Baza lokalna: pozycja głębiej niż zindeksowane półruchy.");
     if (r.lichess_error) notes.push("Lichess: " + r.lichess_error);
     if (r.maia_error) notes.push(model + ": " + r.maia_error);
+    if (/Maia-3/.test(model)) notes.push(r.maia_history ? `${model.replace(/ \(.*\)/, "")} widzi ${r.maia_history} poprzednich pozycji`
+      : `${model.replace(/ \(.*\)/, "")} bez historii ruchów (pozycja z FEN) – w szukaniu przewidywania mogą być inne`);
     if (r.opponent && !r.opponent.reached) notes.push(`${r.opponent.name}: nie grał tej pozycji`);
     if (r.lichess && r.lichess.opening) notes.unshift(r.lichess.opening);
     $("#stats-note").textContent = notes.join(" · ");
@@ -402,12 +404,14 @@ async function pollJob() {
 
 // Kolejka: czekające wyszukiwania z przyciskiem anulowania.
 async function refreshQueue() {
-  let q;
-  try { q = (await api("/api/queue")).queued; } catch (_) { return; }
-  $("#job-queue").innerHTML = q.length ? "W kolejce: " + q.map((j, i) =>
-    `<span class="qitem">${i + 1}. ${j.color === "white" ? "białe" : "czarne"} · ${j.elo} · ` +
+  let q, cal;
+  try { ({ queued: q, calibration: cal } = await api("/api/queue")); } catch (_) { return; }
+  const calHtml = cal ? `<span class="qitem">${esc(cal.message || "Kalibracja modelu…")} ` +
+    `<button class="link" data-qcancel="${esc(cal.id)}" title="Przerwij kalibrację (zebrane pozycje zostaną zapisane)">✕</button></span> ` : "";
+  $("#job-queue").innerHTML = calHtml + (q.length ? "W kolejce: " + q.map((j, i) =>
+    `<span class="qitem">${i + 1}. ${j.kind === "calibration" ? "kalibracja modelu" : j.color === "white" ? "białe" : "czarne"} · ${j.elo} · ` +
     `${j.deadline ? "do " + fmtClock(j.deadline) : j.budget + " poz."} ` +
-    `<button class="link" data-qcancel="${esc(j.id)}" title="Usuń z kolejki">✕</button></span>`).join(" ") : "";
+    `<button class="link" data-qcancel="${esc(j.id)}" title="Usuń z kolejki">✕</button></span>`).join(" ") : "");
 }
 
 $("#job-queue").addEventListener("click", async (e) => {
@@ -734,7 +738,7 @@ function plural(n, one, few, many) {
 
 const FILTERS = {
   traps: [["all", "wszystkie"], ["main", "bez rzadkiego dojścia"], ["star", "★ moje"], ["verified", "zweryfikowane"],
-    ["hidden", "ukryte"], ["games", "z partiami w bazach"], ["opp", "przeciwnik tu był"]],
+    ["hidden", "ukryte"], ["sure", "pewne (z partii albo ukryte)"], ["games", "z partiami w bazach"], ["opp", "przeciwnik tu był"]],
   hard: [["all", "wszystkie"], ["star", "★ moje"], ["verified", "zweryfikowane"]],
   nov: [["all", "wszystkie"], ["novelty", "tylko N/TN (bez rzadkich wariantów)"], ["star", "★ moje"],
     ["verified", "zweryfikowane"], ["tn", "TN (nigdy nie grane)"]],
@@ -762,6 +766,7 @@ function keepFn(kind, f = resFilter(kind)) {
     if (f === "star") return !!mark(kind, it).star;
     if (f === "verified") return it.verified === true;
     if (f === "hidden") return !!it.hidden;
+    if (f === "sure") return it.confidence ? it.confidence === "games" || it.confidence === "hidden" : !!it.hidden || (it.games_total || 0) >= 30;
     if (f === "tn") return it.games === 0;
     if (f === "main") return !it.rare;
     if (f === "games") return !!(it.local_games || it.lichess_games);
@@ -890,6 +895,13 @@ function reachStr(r) {
 }
 
 function hiddenTag(t) {
+  if (t.confidence === "shallow" && t.hidden_depth != null) {
+    return `<span class="tag warn" title="Silnik widzi błąd już na głębokości ${t.hidden_depth}, a w pozycji prawie nie ma partii - odsetek błędów przewiduje model. Silni gracze rzadko przeoczają takie błędy (kalibracja to uwzględnia).">widać od razu (gł. ${t.hidden_depth})</span>`;
+  }
+  if (t.hidden && t.hidden_depth == null && (t.confidence || t.hidden_max)) {
+    const mx = t.hidden_max || 8;
+    return `<span class="tag hid" title="Silnik nie widzi błędu do głębokości ${mx} - człowiekowi łatwo to przeoczyć">ukryta (gł. &gt; ${mx})</span>`;
+  }
   if (t.hidden_depth != null) {
     return t.hidden
       ? `<span class="tag hid" title="Silnik widzi, że zły ruch jest błędem dopiero od głębokości ${t.hidden_depth} - człowiekowi łatwo to przeoczyć">ukryta (gł. ${t.hidden_depth})</span>`
@@ -912,7 +924,25 @@ function statsLine(res) {
   const st = res.stats || {};
   const parts = [`Przeanalizowano ${res.analysed} pozycji`];
   if (st.transpositions) parts.push(`${st.transpositions} transpozycji połączonych`);
-  if (st.verified) parts.push(`zweryfikowano ${st.verified.traps} pułapek, ${st.verified.lines} linii i ${st.verified.novelties} nowinek`);
+  const v = st.verified;
+  if (v && v.planned) {
+    const pl = v.planned;
+    parts.push(`${v.interrupted ? '<b class="warntxt">weryfikacja przerwana (koniec czasu)</b>' : "zweryfikowano"}: pułapki ${v.traps}/${pl.traps}, linie ${v.lines}/${pl.lines}, nowinki ${v.novelties}/${pl.novelties}` +
+      (v.cut ? `, odcięto ${v.cut} ${plural(v.cut, "pozycję", "pozycje", "pozycji")} po naszych ruchach` : ""));
+  } else if (v) parts.push(`zweryfikowano ${v.traps} pułapek, ${v.lines} linii i ${v.novelties} nowinek`);
+  const cal = st.calibration;
+  if (cal && cal.kind) {
+    const what = cal.kind === "measured" ? `pomiar na bazie (${cal.measured.positions} pozycji, ${esc(cal.measured.elo || "")})`
+      : cal.kind === "search" ? `krzywa startowa + ${cal.positions} pozycji z partii z wyszukiwań`
+      : "krzywa startowa";
+    parts.push(`kalibracja: ${what}` + (cal.kind !== "measured"
+      ? ' <span class="muted" title="Ustawienia (⚙) → Kalibruj model: pomiar na partiach z Twojej bazy dla tego modelu i rankingu - dokładniejsza poprawka odsetka błędów">(dokładniej: ⚙ → Kalibruj model)</span>' : ""));
+  }
+  const bs = st.budget_split;
+  if (bs && bs.length > 1) {
+    parts.push("budżet: " + bs.slice(0, 5).map((b) =>
+      `<span title="${pctStr(b.p)} partii, ${b.analysed} przeanalizowanych pozycji">${esc(b.san)} ${pctStr(b.p)}→${pctStr(b.share)}</span>`).join(", "));
+  }
   if (res.human_model) parts.push(`model: ${esc(res.human_model)}`);
   if (res.opponent) parts.push(`przeciwnik: ${esc(res.opponent.name)} (${res.opponent.games} partii)`);
   return parts.join(" · ") + "." + (res.partial ? ' <b class="warntxt">Wyniki częściowe (bez weryfikacji).</b>' : "");
@@ -1030,6 +1060,7 @@ function renderTraps(res) {
           <span title="Średnio ile % szansy wygranej przeciwnik tu oddaje">siła <b>${(t.trick * 100).toFixed(1)}</b></span>
           ${t.gain != null ? `<span title="O ile rośnie Twój oczekiwany wynik w tej pozycji dzięki ludzkim błędom">zysk <b>+${(t.gain * 100).toFixed(1)}%</b></span>` : ""}
           ${t.per100 != null ? `<span title="Oczekiwany zysk w punktach na 100 partii od pozycji startowej (dojście × zysk)">na 100 partii <b>+${t.per100.toFixed(t.per100 < 1 ? 2 : 1)} pkt</b></span>` : ""}
+          ${t.line_net ? `<span class="${t.line_net.per100 < 0 ? "costtxt" : "muted"}" title="Czy opłaca się Twoje pierwsze odejście od najlepszego ruchu w tej linii (${esc(t.line_net.at)} zamiast ${esc(t.line_net.best)}): oczekiwany wynik ze WSZYSTKIMI pułapkami i błędami przeciwnika po nim minus wynik po najlepszym ruchu, w punktach na 100 partii. Dotyczy całej linii, nie tylko tej pułapki.">${esc(t.line_net.at)}: netto <b>${t.line_net.per100 >= 0 ? "+" : ""}${t.line_net.per100.toFixed(2)}</b></span>` : ""}
           ${t.cost >= 10 ? `<span class="costtxt" title="Ile oceny oddajesz swoimi ruchami w tej linii względem najlepszych ruchów silnika">koszt <b>−${(t.cost / 100).toFixed(2)}</b></span>` : ""}
           ${hiddenTag(t)}
           ${t.calibrated ? `<span class="tag soft" title="${t.games_total ? `Tylko ${t.games_total} partii - błąd w dużej części przewiduje model` : "Brak partii - błąd przewiduje sam model"}; część z modelu skalibrowano na prawdziwych partiach (przed kalibracją ${pctStr(t.error_raw || 0)})">${t.games_total ? "mało partii" : "bez partii"}</span>` : ""}
@@ -1270,6 +1301,7 @@ async function loadStatus() {
     ].join("");
     $("#set-info").textContent = s.lichess_error ? "Ostatni błąd Lichess: " + s.lichess_error : (s.lichess_token ? "Token ustawiony." : "Brak tokenu - statystyki Lichess wyłączone.");
     renderSettings(s);
+    if (s.search_running || s.queued) refreshQueue();
     // częstsze odświeżanie, gdy coś się dzieje w tle
     clearTimeout(statusTimer);
     statusTimer = setTimeout(loadStatus, db.building.running || $("#dlg-settings").open ? 2500 : 15000);
@@ -1574,3 +1606,127 @@ loadOpponents().then(() => refresh());
 loadStatus();
 loadSaved();
 
+// ------------------------------------------------------------------ aktualizacje modeli
+
+let updTimer = null;
+
+function updListHtml(u) {
+  return u.updates.map((x) => `<b>${esc(x.name)}</b> <span class="muted" title="${esc(x.info || "")}">${esc(x.installed)} → ${esc(x.latest)}${x.info ? " (" + esc(x.info) + ")" : ""}</span>`).join(", ");
+}
+
+function showUpdateNotice(html, cancelPending) {
+  const b = $("#update-banner");
+  b.innerHTML = html + (cancelPending ? ' <button type="button" class="small ghost" id="upd-unplan">Nie instaluj</button>' : "") +
+    ' <button type="button" class="small ghost" id="upd-close">OK</button>';
+  b.classList.remove("hidden");
+  $("#upd-close").onclick = () => b.classList.add("hidden");
+  if (cancelPending) $("#upd-unplan").onclick = async () => { await api("/api/updates/pending", { method: "DELETE" }); b.classList.add("hidden"); };
+}
+
+async function checkUpdates(force = false) {
+  let u;
+  try { u = await api(`/api/updates${force ? "?force=1" : ""}`); } catch (_) { return; }
+  const box = $("#set-updates");
+  if (u.state && u.state.running) return pollUpdate();
+  if (u.last_install) {
+    const li = u.last_install;
+    showUpdateNotice(li.ok ? `Zaktualizowano: ${esc(li.items.join(", "))} (${esc(li.time)}).`
+      : `<span class="badtxt">Aktualizacja (${esc(li.items.join(", "))}) nie powiodła się: ${esc(li.error)}</span>`, false);
+    return;
+  }
+  if (u.pending) {
+    box.textContent = `Zaplanowana instalacja przy następnym uruchomieniu: ${u.pending.items.join(", ")}.`;
+    if (!force) return;
+  }
+  if (u.updates.length) {
+    box.innerHTML = "Dostępne: " + updListHtml(u);
+    if (!sessionStorage.getItem("upd-later") || force) showUpdateBanner(u);
+  } else {
+    box.textContent = u.errors.length ? `Nie udało się sprawdzić (${u.errors.join(", ")}).` : `Modele są aktualne (sprawdzono ${u.checked}).`;
+  }
+}
+
+function showUpdateBanner(u) {
+  const b = $("#update-banner");
+  const restart = u.updates.some((x) => x.restart);
+  b.innerHTML = `Nowa wersja modeli: ${updListHtml(u)}${restart ? ' <span class="muted">(program sprawdzi, co się zmieni, a zainstaluje przy następnym uruchomieniu)</span>' : ""}
+    <button type="button" class="small primary" id="upd-yes">Aktualizuj</button>
+    <button type="button" class="small ghost" id="upd-later">Później</button>`;
+  b.classList.remove("hidden");
+  $("#upd-later").onclick = () => { sessionStorage.setItem("upd-later", "1"); b.classList.add("hidden"); };
+  $("#upd-yes").onclick = async () => {
+    try {
+      const r = await api("/api/updates", { method: "POST", body: { ids: u.updates.map((x) => x.id) } });
+      if (r.error && !r.running) { showUpdateNotice(`<span class="badtxt">${esc(r.error)}</span>`, false); return; }
+      pollUpdate();
+    } catch (e) { b.innerHTML = `<span class="badtxt">${esc(e.message)}</span>`; }
+  };
+}
+
+async function pollUpdate() {
+  clearTimeout(updTimer);
+  let s;
+  try { s = await api("/api/updates/status"); } catch (_) { return; }
+  const b = $("#update-banner");
+  b.classList.remove("hidden");
+  if (s.running) {
+    b.innerHTML = esc(s.message) + " …";
+    updTimer = setTimeout(pollUpdate, 2000);
+    return;
+  }
+  if (s.error) showUpdateNotice(`<span class="badtxt">${esc(s.message)}: ${esc(s.error)}</span>`, false);
+  else showUpdateNotice(esc(s.message), s.restart);
+  loadStatus();
+}
+
+$("#btn-upd-check").onclick = () => { $("#set-updates").textContent = "Sprawdzam…"; checkUpdates(true); };
+setTimeout(() => checkUpdates(false), 1500);
+
+// ------------------------------------------------------------------ kalibracja na bazie
+
+let calibTimer = null;
+
+function calibTable(sum) {
+  if (!sum || !sum.all || !sum.all.length) return "";
+  const row = (k, label) => (sum[k] || []).filter((b) => b.pred >= 0.1).map((b) =>
+    `<tr><td>${label}</td><td>${pctStr(b.pred)}</td><td>${pctStr(b.actual)}</td><td class="muted">${b.n}</td></tr>`).join("");
+  return `<table class="calib-tbl"><tr><th></th><th>model</th><th>w partiach</th><th>pozycji</th></tr>
+    ${row("all", "wszystkie")}${row("shallow", "widać od razu")}${row("deep", "ukryte")}</table>`;
+}
+
+async function loadCalib() {
+  clearTimeout(calibTimer);
+  const lo = +$("#p-elo-min").value, hi = +$("#p-elo-max").value;
+  let r;
+  try { r = await api(`/api/calibration?elo_min=${lo}&elo_max=${hi}`); } catch (e) { $("#set-calib").textContent = e.message; return; }
+  const c = r.current;
+  let html = `Model <b>${esc(r.model)}</b>, ranking ${lo}–${hi}: `;
+  html += c ? `pomiar na bazie z ${c.date}: <b>${c.positions}</b> pozycji (${c.errors} błędów w partiach)` +
+      (c.positions < r.min_positions ? ` <span class="warntxt">– za mało (potrzeba ${r.min_positions}), używana krzywa startowa</span>` : "")
+    : '<span class="warntxt">brak pomiaru</span> – używana krzywa startowa i dane z wyszukiwań.';
+  if (r.job) html += `<br>${r.job.status === "queued" ? "Czeka w kolejce…" : esc(r.job.message || "Start…")}`;
+  else if (r.last) {
+    const lr = r.last;
+    html += `<br>Ostatnia kalibracja: ${lr.status === "done" ? "zakończona" : lr.status === "error" ? '<span class="badtxt">błąd: ' + esc(lr.error || "") + "</span>" : "przerwana"}` +
+      (lr.saved != null ? ` – zapisano ${lr.saved} pozycji` : "") + (lr.note ? ` <span class="warntxt">(${esc(lr.note)})</span>` : "") +
+      (lr.summary ? ":" + calibTable(lr.summary) : "");
+  }
+  $("#set-calib").innerHTML = html;
+  $("#btn-calib").classList.toggle("hidden", !!r.job);
+  $("#btn-calib-cancel").classList.toggle("hidden", !r.job);
+  $("#btn-calib-cancel").dataset.job = r.job ? r.job.id : "";
+  if (r.job && $("#dlg-settings").open) calibTimer = setTimeout(loadCalib, 3000);
+}
+
+$("#btn-calib").onclick = () => settingsAction(async () => {
+  await api("/api/calibrate", { method: "POST", body: {
+    elo_min: +$("#p-elo-min").value, elo_max: +$("#p-elo-max").value, positions: +$("#calib-n").value || 2000 } });
+  refreshQueue();
+  loadCalib();
+});
+$("#btn-calib-cancel").onclick = async () => {
+  const id = $("#btn-calib-cancel").dataset.job;
+  if (id) await api(`/api/search/${id}/cancel`, { method: "POST" });
+  setTimeout(loadCalib, 500);
+};
+$("#btn-settings").addEventListener("click", () => loadCalib());

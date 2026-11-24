@@ -65,9 +65,10 @@ MISTAKE = 0.10              # spadek szansy wygranej od tej wartości = błąd (
 MIN_ERROR_CHANCE = 0.08     # pułapka = co najmniej tyle ludzi popełnia tu błąd
 WINNING_CP = 300            # od tej oceny uznajemy pozycję za wygraną - nie rozwijamy dalej
 PRIOR_GAMES = 25            # ile partii "jest warta" Maia przy mieszaniu ze statystykami
-SHALLOW_DEPTH = 6           # "pierwsze wrażenie" silnika (ukryte pułapki)
+SHALLOW_DEPTH = 6           # błąd widoczny do tej głębokości = "nie ukryty"
 HIDDEN_DEPTHS = (2, 4, 6, 8, 10, 12, 14, 16)
-CALIB_MAX_GAMES = 30        # poniżej tylu partii przewidywany błąd kalibrujemy
+QUICK_HIDDEN = 10           # w trakcie szukania głębokość ukrycia sprawdzamy do tej głębokości
+QUEUE_REACH_EVERY = 5 * 60  # co tyle sekund dokładne dojście dla pozycji w kolejce (transpozycje)
 OPP_PRIOR = 3               # waga statystyk przeciwnika: n / (n + OPP_PRIOR)
 CHECKPOINT_EVERY = 15 * 60  # zapis wyników częściowych (s)
 MIN_TIME_LEFT = 5 * 60      # tryb "do godziny": tyle czasu musi zostać, gdy szukanie wychodzi z kolejki
@@ -130,7 +131,8 @@ class Node:
                  "error", "p_good", "only_move", "moment", "hidden", "move_games", "novelty",
                  "ply", "creach", "parents", "edge_p", "ev", "refuted", "reverified", "hidden_depth",
                  "calibrated", "err_raw", "family", "opp_games", "src_games", "maia_p", "games_total",
-                 "edge_cp")
+                 "edge_cp", "err_model", "err_games", "hidden_checked", "hidden_max",
+                 "lichess_skipped", "cal_ver")
 
     _ids = itertools.count()
 
@@ -170,6 +172,12 @@ class Node:
         self.hidden_depth: int | None = None
         self.calibrated = False
         self.err_raw: float | None = None
+        self.err_model: float | None = None   # odsetek błędów wg samego modelu (bez partii)
+        self.err_games: float | None = None   # odsetek błędów w partiach (gdy są)
+        self.hidden_checked = False            # głębokość ukrycia sprawdzona
+        self.hidden_max: int | None = None     # do jakiej głębokości (gdy hidden_depth = None)
+        self.lichess_skipped = False           # Lichess nie pytany (poprzednia pozycja bez partii)
+        self.cal_ver = -1                      # wersja krzywej kalibracji użyta w tej pozycji
         self.error = 0.0
         self.p_good = 1.0
         self.only_move = False
@@ -205,21 +213,27 @@ class HumanPolicy:
         self.stats = stats
         self.book = book
 
-    def counts(self, board: chess.Board):
-        """-> (partie per ruch razem, partie lokalnie, partie Lichess, {ruch: (lokalnie, Lichess)})"""
+    def counts(self, board: chess.Board, skip_local: bool = False, skip_lichess: bool = False):
+        """-> (partie per ruch razem, partie lokalnie, partie Lichess, {ruch: (lokalnie, Lichess)})
+
+        ``skip_*``: poprzednia pozycja nie ma partii w tym źródle, więc ta też nie ma (bez zapytania)."""
         merged: dict[str, int] = {}
         src: dict[str, list] = {}
         local_total = lichess_total = None
         if self.p.use_local_db and self.stats.local.available:
-            r = self.stats.local.query(board, self.p.elo_min, self.p.elo_max)
-            if not r.get("beyond_index"):
-                local_total = r["total"]
-                for m in r["moves"]:
-                    merged[m.uci] = merged.get(m.uci, 0) + m.games
-                    src.setdefault(m.uci, [0, 0])[0] += m.games
+            if skip_local:
+                local_total = 0
+            else:
+                r = self.stats.local.query(board, self.p.elo_min, self.p.elo_max)
+                if not r.get("beyond_index"):
+                    local_total = r["total"]
+                    for m in r["moves"]:
+                        merged[m.uci] = merged.get(m.uci, 0) + m.games
+                        src.setdefault(m.uci, [0, 0])[0] += m.games
         if self.p.use_lichess and self.stats.lichess.enabled:
-            r = self.stats.lichess_query(board, self.p.elo_min, self.p.elo_max, self.p.speeds,
-                                         self.p.lichess_source)
+            r = ({"available": True, "total": 0, "moves": []} if skip_lichess else
+                 self.stats.lichess_query(board, self.p.elo_min, self.p.elo_max, self.p.speeds,
+                                          self.p.lichess_source))
             if r["available"]:
                 lichess_total = r["total"]
                 for m in r["moves"]:
@@ -227,11 +241,12 @@ class HumanPolicy:
                     src.setdefault(m["uci"], [0, 0])[1] += m["games"]
         return merged, local_total, lichess_total, {u: tuple(v) for u, v in src.items()}
 
-    def __call__(self, board: chess.Board, history: list[chess.Board] | None = None):
+    def __call__(self, board: chess.Board, history: list[chess.Board] | None = None,
+                 skip_local: bool = False, skip_lichess: bool = False):
         """-> (rozkład ruchów, rozkład modelu, partie per ruch, partie lokalnie, partie Lichess,
         partie przeciwnika z tą pozycją)"""
         maia = self.maia.probs(board, self.p.elo_min, self.p.elo_max, history)
-        counts, lt, lit, _ = self.counts(board)
+        counts, lt, lit, _ = self.counts(board, skip_local, skip_lichess)
         n = sum(counts.values())
         legal = {m.uci() for m in board.legal_moves}
         if not maia:  # brak modelu - same statystyki albo rozkład równomierny
@@ -307,6 +322,8 @@ class Searcher:
         self.p = params
         self.job = job
         self.eng = eng or engine_mod.shared()
+        # płytkie analizy (głębokość ukrycia) - osobny mały silnik z czyszczoną pamięcią
+        self.eng_shallow = eng or engine_mod.shallow()
         self.maia = maia or human_mod.shared()
         if hasattr(self.maia, "load"):
             self.maia.load()  # Maia-3, która nie działa, przełącza się tu na Maię-2 (nazwa do kalibracji)
@@ -318,12 +335,16 @@ class Searcher:
         self.nodes: dict[int, Node] = {}
         self.tt: dict[tuple[str, int], Node] = {}
         self.fam_count: Counter = Counter()
-        self.calib = calib_mod.Calibration(getattr(self.maia, "name", "maia2"), params.elo_min, params.elo_max)
+        self.calib = calib_mod.Calibration(
+            getattr(self.maia, "name", "maia2"), params.elo_min, params.elo_max,
+            calib_mod.source_of(params.use_local_db, params.use_lichess, params.lichess_source))
         self.t0 = time.time()
         self._last_ckpt = time.time()
         self.stats_info: dict = {}
         self.pre_boards = self._pre_boards()
         self._alive_ids: set[int] | None = None
+        self._order: list[Node] = []           # węzły posortowane po półruchu (do _mark_alive)
+        self.cut_count = 0                     # ile pozycji odcięła weryfikacja naszych ruchów
 
     # ------------------------------------------------------------ pomocnicze
     def _pre_boards(self) -> list[chess.Board]:
@@ -411,8 +432,10 @@ class Searcher:
                 return None
             parent.children[u] = ex
             ex.parents.append((parent, u))
-            # nasze alternatywne kolejności ruchów: maksimum; ruchy przeciwnika: suma
-            ex.reach = min(1.0, max(ex.reach, reach) if parent.board.turn == self.side else ex.reach + reach)
+            # Priorytet w trakcie szukania: maksimum po drogach (nigdy zawyżone). Suma liczyłaby
+            # kilka razy drogi wymagające różnych kolejności NASZYCH ruchów (zagramy tylko jedną);
+            # dokładne dojście liczy compute_reach().
+            ex.reach = max(ex.reach, reach)
             ex.creach = max(ex.creach, creach)
             new = self._prio(ex.creach, ex.reach)
             if not ex.expanded and new > ex.prio * 1.01:
@@ -440,9 +463,19 @@ class Searcher:
             return self._expand_mine(node)
         return self._expand_opponent(node)
 
+    @staticmethod
+    def _skip_sources(node: Node) -> tuple[bool, bool]:
+        """Czy można pominąć zapytanie do Lichess: każda poprzednia pozycja w drzewie ma tam 0 partii.
+        (Prawie zawsze wtedy ta też ma 0; wyjątek to transpozycja spoza drzewa - dla wyników
+        dopytujemy w _fill_rarity.) Baza lokalna jest pytana zawsze - to ułamek milisekundy."""
+        pars = [par for par, _ in node.parents]
+        skip = bool(pars) and all(par.lichess_games == 0 for par in pars)
+        node.lichess_skipped = skip
+        return False, skip
+
     def _expand_mine(self, node: Node) -> list[Node]:
         p = self.p
-        counts, lt, lit, src = self.policy.counts(node.board)
+        counts, lt, lit, src = self.policy.counts(node.board, *self._skip_sources(node))
         node.move_games, node.local_games, node.lichess_games, node.src_games = counts, lt, lit, src
         total = node.games or 0
         theory = total >= p.theory_min_games
@@ -488,7 +521,7 @@ class Searcher:
     def _expand_opponent(self, node: Node) -> list[Node]:
         p = self.p
         b = node.board
-        policy, maia, counts, lt, lit, opp_n = self.policy(b, self._history(node))
+        policy, maia, counts, lt, lit, opp_n = self.policy(b, self._history(node), *self._skip_sources(node))
         node.policy, node.maia_p, node.move_games = policy, maia, counts
         node.local_games, node.lichess_games, node.opp_games = lt, lit, opp_n
         node.games_total = sum(counts.values())
@@ -519,12 +552,10 @@ class Searcher:
                 pvs.update({l.move: l.pv for l in full})
         self._score_opponent(node, evals, pvs)
 
-        # dane do kalibracji modelu: pozycje z dużą liczbą partii
-        if node.games_total >= calib_mod.MIN_GAMES and not opp_n:
-            bad = [d["uci"] for d in node.move_info if d["loss"] >= MISTAKE]
-            if bad:
-                self.calib.add(sum(maia.get(u, 0.0) for u in bad),
-                               sum(counts.get(u, 0) for u in bad) / node.games_total)
+        # dane do kalibracji modelu: pozycje z partiami (ta sama definicja błędu co przy stosowaniu)
+        if (node.games_total >= calib_mod.MIN_GAMES and not opp_n and node.err_games is not None
+                and node.err_model and any(d["loss"] >= MISTAKE for d in node.move_info)):
+            self.calib.add(node.err_model, node.err_games, b.epd())
 
         if node.best_cp >= WINNING_CP:
             node.terminal = "wygrana"
@@ -573,19 +604,39 @@ class Searcher:
         error = sum(d["p"] for d in info if d["loss"] >= MISTAKE) + (rest if others_bad else 0.0)
         node.err_raw = round(error, 4)
         node.calibrated = False
-        # W pozycjach bez (mało) partii liczy się sam model, który przeszacowuje wysokie odsetki
-        # błędów - skalujemy je krzywą kalibracji (zob. calibration.py).
+        bad_now = [d for d in info if d["loss"] >= MISTAKE]
+        good_now = [d for d in info if d["loss"] < MISTAKE]
+        # błąd wg samego modelu i wg partii - ta sama definicja (z resztą nieocenionych ruchów)
+        mp = node.maia_p
+        err_model = sum(mp.get(d["uci"], 0.0) for d in bad_now)
+        if others_bad:
+            err_model += max(0.0, 1 - sum(mp.get(d["uci"], 0.0) for d in info))
+        node.err_model = err_model = min(1.0, err_model)
+        mg = node.move_games
+        if node.games_total:
+            bad_g = (node.games_total - sum(mg.get(d["uci"], 0) for d in good_now) if others_bad
+                     else sum(mg.get(d["uci"], 0) for d in bad_now))
+            node.err_games = max(0.0, min(1.0, bad_g / node.games_total))
+        else:
+            node.err_games = None
+        # Głębokość ukrycia (czy silnik widzi błąd od razu) - potrzebna do kalibracji: silni
+        # gracze rzadko popełniają błędy widoczne płytko.
+        if (shallow and not node.hidden_checked and error >= MIN_ERROR_CHANCE
+                and bad_now and good_now):
+            bm = max(bad_now, key=lambda d: d["p"])["uci"]
+            gm = min(good_now, key=lambda d: d["loss"])["uci"]
+            node.hidden_depth = self._find_hidden_depth(b, gm, bm, QUICK_HIDDEN)
+            node.hidden_checked = True
+            node.hidden_max = QUICK_HIDDEN
+            node.hidden = node.hidden_depth is None or node.hidden_depth > SHALLOW_DEPTH
+        # Model przeszacowuje odsetki błędów - skalujemy krzywą kalibracji (zob. calibration.py).
+        node.cal_ver = self.calib.version
         scale_bad = 1.0
-        if node.games_total < CALIB_MAX_GAMES and node.opp_games < 5 and error > 0:
+        if node.opp_games < 5 and error > 0 and err_model > 0:
             # Kalibrujemy tylko część pochodzącą z modelu: rozkład to mieszanka partii (waga n)
             # i modelu (waga PRIOR_GAMES), więc poprawka modelu liczy się z wagą modelu.
             w_model = PRIOR_GAMES / (node.games_total + PRIOR_GAMES)
-            mp = node.maia_p
-            err_model = sum(mp.get(d["uci"], 0.0) for d in info if d["loss"] >= MISTAKE)
-            if others_bad:
-                err_model += max(0.0, 1 - sum(mp.get(d["uci"], 0.0) for d in info))
-            err_model = min(1.0, err_model)
-            cal = max(0.0, error - w_model * (err_model - self.calib.apply(err_model)))
+            cal = max(0.0, error - w_model * (err_model - self.calib.apply(err_model, self._hidden_class(node))))
             if cal < error - 1e-4:
                 scale_bad = cal / error
                 scale_good = (1 - cal) / max(1e-9, 1 - error)
@@ -615,11 +666,6 @@ class Searcher:
         b = node.board
         if not bad or node.error < MIN_ERROR_CHANCE:
             return
-        if shallow and node.hidden_depth is None:
-            # "pierwsze wrażenie" silnika: czy płytko też wybrałby błąd?
-            shallow = self.eng.analyse(b, depth=SHALLOW_DEPTH, multipv=1)
-            bad_set = {d["uci"] for d in bad}
-            node.hidden = bool(shallow) and shallow[0].move in bad_set
         if node.error < p.hard_error:
             return
         # przy kilku dobrych ruchach "trudny wybór" dopiero, gdy myli się większość ludzi
@@ -652,29 +698,120 @@ class Searcher:
             "bad": [{"san": d["san"], "uci": d["uci"], "p": d["p"], "cp": d["cp"], "pv": d.get("pv")}
                     for d in bad_sorted[:3]],
             "hidden": node.hidden,
-            "hidden_depth": node.hidden_depth,
+            "hidden_depth": node.hidden_depth, "hidden_max": node.hidden_max,
             "calibrated": node.calibrated, "games": node.games_total,
+            "confidence": self.confidence(node),
         }
 
     # ------------------------------------------------------------ wartości
-    def compute_reach(self) -> None:
-        """Szansa dotarcia jako suma po wszystkich drogach (transpozycje)."""
-        order = sorted(self.nodes.values(), key=lambda n: n.ply)
-        for n in order:
+    def _sorted_nodes(self) -> list[Node]:
+        if len(self._order) != len(self.nodes):
+            self._order = sorted(self.nodes.values(), key=lambda n: n.ply)
+        return self._order
+
+    @staticmethod
+    def _live_parents(n: Node) -> list[tuple[Node, str]]:
+        return [(par, u) for par, u in n.parents if par.children.get(u) is n]
+
+    def compute_reach(self, reparent: bool = False) -> set[int]:
+        """Szansa dotarcia przy naszej najlepszej strategii.
+
+        Bez transpozycji to iloczyn p ruchów przeciwnika na drodze. Gdy do pozycji prowadzi kilka
+        dróg, nie wolno ich po prostu sumować: drogi różniące się kolejnością NASZYCH ruchów to
+        alternatywy (zagramy jedną), a sumują się tylko drogi różniące się ruchami przeciwnika.
+        Dla takich pozycji liczymy dojście dokładnie (_exact_reach), dla pozostałych wystarczy
+        przejście w przód."""
+        alive = self._alive_ids
+        multi: set[int] = set()
+        for n in self._sorted_nodes():
             if n.parent is None:
                 n.reach = 1.0
                 continue
-            mine = opp = 0.0
-            for par, u in n.parents:
-                if par.children.get(u) is not n:
-                    continue  # krawędź odcięta przez weryfikację
-                if par.board.turn == self.side:
-                    # różne kolejności NASZYCH ruchów to alternatywy - wybieramy jedną
-                    mine = max(mine, par.reach)
-                else:
-                    # różne ruchy przeciwnika prowadzące do tej samej pozycji - szanse się sumują
-                    opp += par.reach * par.edge_p.get(u, 1.0)
-            n.reach = min(1.0, max(mine, opp))
+            live = [(par, u) for par, u in self._live_parents(n) if alive is None or par.id in alive]
+            if not live:
+                continue
+            if len(live) > 1 or any(par.id in multi for par, _ in live):
+                multi.add(n.id)
+            # przybliżenie (dolne oszacowanie): najlepsza pojedyncza droga
+            n.reach = max(par.reach * (1.0 if par.board.turn == self.side else par.edge_p.get(u, 1.0))
+                          for par, u in live)
+        for n in self.nodes.values():
+            if n.id in multi and self._reach_matters(n) and (alive is None or n.id in alive):
+                n.reach = self._exact_reach(n, reparent)
+        return multi
+
+    def _reach_matters(self, n: Node) -> bool:
+        """Węzły, których dojście trafia do wyników (pułapki, momenty, nowinki)."""
+        return (n.moment is not None or n.novelty is not None
+                or (n.board.turn != self.side and n.expanded and n.error >= MIN_ERROR_CHANCE))
+
+    def _exact_reach(self, target: Node, reparent: bool = False) -> float:
+        """Dojście do ``target`` przy najlepszej dla nas strategii: programowanie dynamiczne po
+        przodkach (na naszym ruchu maksimum, na ruchu przeciwnika suma p · wartość).
+
+        ``reparent``: pokazywana linia celu (pierwszy rodzic) ma iść tą kolejnością NASZYCH ruchów,
+        której dotyczy dojście - wtedy koszt, „netto” i weryfikacja dotyczą tej samej drogi."""
+        alive = self._alive_ids
+        anc: dict[int, Node] = {target.id: target}
+        stack = [target]
+        while stack:
+            x = stack.pop()
+            for par, _ in self._live_parents(x):
+                if par.id not in anc and (alive is None or par.id in alive):
+                    anc[par.id] = par
+                    stack.append(par)
+        val: dict[int, float] = {target.id: 1.0}
+        for x in sorted(anc.values(), key=lambda n: -n.ply):
+            if x is target:
+                continue
+            if x.board.turn == self.side:
+                v = max((val.get(c.id, 0.0) for c in x.children.values() if c.id in anc), default=0.0)
+            else:
+                v = sum(x.edge_p.get(u, c.prob) * val.get(c.id, 0.0)
+                        for u, c in x.children.items() if c.id in anc)
+            val[x.id] = v
+        if reparent:
+            self._follow_best(target, anc, val)
+        return min(1.0, val.get(self.root.id, 0.0))
+
+    def _follow_best(self, target: Node, anc: dict[int, Node], val: dict[int, float]) -> None:
+        """Ustawia linię celu wzdłuż najlepszej strategii (na naszym ruchu najlepsza kontynuacja,
+        na ruchu przeciwnika najbardziej prawdopodobna droga). Węzłów z opisem nowinki nie ruszamy
+        (opis dotyczy ruchu z konkretnej pozycji)."""
+        steps, x = [], self.root
+        while x is not target:
+            opts = [(u, c) for u, c in x.children.items() if c.id in anc]
+            if not opts:
+                return
+            if x.board.turn == self.side:
+                u, c = max(opts, key=lambda uc: val.get(uc[1].id, 0.0))
+            else:
+                u, c = max(opts, key=lambda uc: x.edge_p.get(uc[0], uc[1].prob) * val.get(uc[1].id, 0.0))
+            steps.append((x, u, c))
+            x = c
+        if any(c.parent is not a and c.novelty is not None for a, _, c in steps):
+            return
+        for a, u, c in steps:
+            if c.parent is not a:
+                c.parent, c.move = a, chess.Move.from_uci(u)
+                c.san = a.board.san(c.move)
+                c.prob = a.edge_p.get(u, c.prob)
+
+    def _refresh_queue(self) -> list[Node]:
+        """Dokładne dojście dla nierozwiniętych pozycji z transpozycjami (w trakcie szukania bierzemy
+        maksimum po drogach, które zaniża pozycje osiągalne różnymi ruchami przeciwnika).
+        Zwraca węzły, którym wzrósł priorytet."""
+        multi = self.compute_reach()
+        out = []
+        for n in self.nodes.values():
+            if n.expanded or n.id not in multi or n.ply >= self.p.max_plies:
+                continue
+            n.reach = max(n.reach, self._exact_reach(n))
+            new = self._prio(n.creach, n.reach)
+            if new > n.prio * 1.01:
+                n.prio = new
+                out.append(n)
+        return out
 
     def backup(self) -> None:
         memo: dict[int, float] = {}
@@ -752,6 +889,41 @@ class Searcher:
                 c += max(0, par.best_cp - cp)
         return c
 
+    def line_net(self, n: Node) -> dict | None:
+        """Czy opłaca się pierwsze odejście od najlepszego ruchu silnika na drodze do pozycji:
+        oczekiwany wynik po naszym ruchu (z WSZYSTKIMI ludzkimi błędami w poddrzewie) minus
+        oczekiwany wynik po najlepszym ruchu, w punktach na 100 partii od pozycji startowej.
+        Jedno odejście „kupuje” wszystkie pułapki pod nim, więc liczymy je dla odejścia,
+        a nie dla każdej pułapki osobno."""
+        for x in n.path()[1:]:
+            par = x.parent
+            if par.board.turn != self.side or not par.lines or par.best_cp is None:
+                continue
+            u, best_u = x.move.uci(), par.lines[0].move
+            if u == best_u:
+                continue
+            cp = par.edge_cp.get(u)
+            ev_x = x.ev if x.ev is not None else win_chance(cp if cp is not None else (x.my_cp or 0))
+            ev_best = win_chance(par.best_cp)
+            bc = par.children.get(best_u)
+            if bc is not None and bc.ev is not None:
+                ev_best = max(ev_best, bc.ev)
+            b = par.board
+            num = f"{b.fullmove_number}." if b.turn == chess.WHITE else f"{b.fullmove_number}..."
+            return {"per100": round(100 * par.reach * (ev_x - ev_best), 3), "at": num + x.san,
+                    "best": num + b.san(chess.Move.from_uci(best_u))}
+        return None
+
+    def confidence(self, n: Node) -> str:
+        """Skąd wiemy, że ludzie tu się mylą: "games" - z partii, "hidden" - model, błąd ukryty,
+        "shallow" - model, a silnik widzi błąd od razu (silni gracze rzadko go popełniają),
+        "model" - sam model, ukrycia nie sprawdzano."""
+        if n.games_total >= calib_mod.MIN_GAMES:
+            return "games"
+        if not n.hidden_checked:
+            return "model"
+        return "hidden" if n.hidden else "shallow"
+
     # ------------------------------------------------------------ główna pętla
     def run(self) -> dict:
         p = self.p
@@ -762,7 +934,12 @@ class Searcher:
         tie = itertools.count()
         heap: list = [(-1.0, 0, next(tie), root)]
         demotes = 0
+        last_refresh = time.time()
         while heap and not self._stop_expanding():
+            if time.time() - last_refresh > QUEUE_REACH_EVERY:
+                last_refresh = time.time()
+                for n in self._refresh_queue():
+                    heapq.heappush(heap, (-n.prio, n.ply, next(tie), n))
             negp, _, _, node = heapq.heappop(heap)
             if node.expanded:
                 continue
@@ -801,33 +978,69 @@ class Searcher:
         a = self.analysed
         return max(40, min(300, a // 8)), max(30, min(150, a // 16)), max(30, min(150, a // 16))
 
+    def _recalibrate(self) -> None:
+        """Wszystkie pozycje przeciwnika jedną, ostateczną krzywą kalibracji (z danymi z tego
+        szukania) - bez silnika: oceny ruchów i p modelu są zapisane w węzłach."""
+        self.calib.refresh()
+        ver = self.calib.version
+        for n in self.nodes.values():
+            if n.board.turn == self.side or not n.expanded or not n.move_info or n.cal_ver == ver:
+                continue
+            evals = {d["uci"]: d["cp"] for d in n.move_info}
+            pvs = {d["uci"]: (d.get("pv") or {}).get("uci", []) for d in n.move_info}
+            refuted = n.refuted
+            self._score_opponent(n, evals, pvs, shallow=False)
+            if refuted:
+                n.moment = None
+
     def results(self, verify: bool, rarity: bool = True) -> dict:
         self._mark_alive()
-        self.compute_reach()
+        self._recalibrate()
+        self.compute_reach(reparent=True)
         self.backup()
         self.compute_ev()
         traps, lines, novs = self.collect_traps(), self.collect_hard_lines(), self.collect_novelties()
         ver = {"traps": 0, "lines": 0, "novelties": 0}
         if verify:
             t0 = time.time()
-            nt = min(60, max(10, round(0.2 * min(len(traps), self._caps()[0]))))
-            nh = min(25, max(8, round(0.2 * min(len(lines), self._caps()[1]))))
-            nn = min(25, max(10, round(0.2 * min(len(novs), self._caps()[2]))))
+            nt = min(60, len(traps), max(10, round(0.2 * min(len(traps), self._caps()[0]))))
+            nh = min(25, len(lines), max(8, round(0.2 * min(len(lines), self._caps()[1]))))
+            nn = min(25, len(novs), max(10, round(0.2 * min(len(novs), self._caps()[2]))))
+            ver.update(planned={"traps": nt, "lines": nh, "novelties": nn})
             self._status("Weryfikacja najlepszych wyników…")
-            self.verify_paths(traps[:nt] + [h["node"] for h in lines[:nh]])
-            for i, t in enumerate(traps[:nt]):
+            # Na przemian pułapka, linia, nowinka (według rankingu): gdy skończy się czas,
+            # każda grupa ma sprawdzone swoje najlepsze wyniki.
+            work = []
+            for i in range(max(nt, nh, nn)):
+                if i < nt:
+                    work.append(("traps", traps[i]))
+                if i < nh:
+                    work.append(("lines", lines[i]))
+                if i < nn:
+                    work.append(("novelties", novs[i]))
+            for kind, item in work:
                 if self._verify_time_over():
+                    ver["interrupted"] = True
                     break
-                self._status(f"Weryfikacja pułapki {i + 1}/{nt}: {self._line_text(t)}")
-                self.reverify_opponent(t)
-                ver["traps"] += 1
-            for h in lines[:nh]:
-                if self._verify_time_over():
+                if kind == "traps":
+                    self._status(f"Weryfikacja pułapki {ver['traps'] + 1}/{nt}: {self._line_text(item)}")
+                    self.verify_paths([item])
+                    if self._alive(item) and item.verified is not False:
+                        self.reverify_opponent(item)
+                elif kind == "lines":
+                    self._status(f"Weryfikacja linii {ver['lines'] + 1}/{nh}")
+                    node = item["node"]
+                    self.verify_paths([node])
+                    if self._alive(node):  # momenty z bieżącej drogi (po odcięciach mogła się zmienić)
+                        for m in [x for x in node.path() if x.moment is not None and not x.refuted]:
+                            self.reverify_opponent(m)
+                else:
+                    self._verify_novelty(item)
+                if self._verify_time_over():  # przerwane w trakcie - nie liczymy jako sprawdzone
+                    ver["interrupted"] = True
                     break
-                for m in h["moments"]:
-                    self.reverify_opponent(m)
-                ver["lines"] += 1
-            ver["novelties"] = self.verify_novelties(novs[:nn])
+                ver[kind] += 1
+            ver["cut"] = self.cut_count
             self._mark_alive()
             self.compute_reach()
             self.backup()
@@ -841,10 +1054,36 @@ class Searcher:
         n_nodes = len(self.nodes)
         n_trans = sum(max(0, len(n.parents) - 1) for n in self.nodes.values())
         self.stats_info = {"nodes": n_nodes, "transpositions": n_trans, "analysed": self.analysed,
-                           "verified": ver, "calibration": self.calib.summary() or None,
+                           "verified": ver, "calibration": self.calib.summary(),
+                           "budget_split": self._budget_split(),
                            "calibration_points": [list(p) for p in self.calib.points],
                            "elapsed": round(time.time() - self.t0)}
         return self.export(traps, lines, novs)
+
+    def _budget_split(self) -> list[dict]:
+        """Pierwsze ruchy przeciwnika: udział w partiach (p) i w przeanalizowanych pozycjach."""
+        opp = self.root if self.root.board.turn != self.side else None
+        if opp is None:  # zaczynamy my - bierzemy pozycję po naszym najlepszym ruchu
+            kids = sorted(self.root.children.values(), key=lambda c: -c.value)
+            opp = kids[0] if kids else None
+        if opp is None or not opp.children:
+            return []
+        cnt: Counter = Counter()
+        firsts = {c.id: u for u, c in opp.children.items()}
+        for n in self.nodes.values():
+            if not n.expanded:
+                continue
+            x = n
+            while x.parent is not None and x.parent is not opp:
+                x = x.parent
+            if x.parent is opp and x.id in firsts:
+                cnt[firsts[x.id]] += 1
+        total = sum(cnt.values()) or 1
+        out = []
+        for u, c in sorted(opp.children.items(), key=lambda kv: -opp.edge_p.get(kv[0], 0)):
+            out.append({"san": opp.board.san(chess.Move.from_uci(u)), "p": round(opp.edge_p.get(u, 0), 4),
+                        "analysed": cnt[u], "share": round(cnt[u] / total, 4)})
+        return out
 
     # ------------------------------------------------------------ wyniki: pułapki
     def _mark_alive(self) -> None:
@@ -852,7 +1091,7 @@ class Searcher:
         prowadzi kilka dróg (transpozycje), żyje, gdy żyje którakolwiek z nich; jeśli odcięto
         jego pierwszą drogę, linią węzła staje się inna żywa droga."""
         alive: set[int] = {self.root.id}
-        for n in sorted(self.nodes.values(), key=lambda x: x.ply):
+        for n in self._sorted_nodes():
             if n.parent is None:
                 continue
             ok = [(par, u) for par, u in n.parents if par.id in alive and par.children.get(u) is n]
@@ -875,7 +1114,8 @@ class Searcher:
 
     def _hidden_factor(self, n: Node) -> float:
         if n.hidden_depth is None:
-            return 0.9
+            # sprawdzone do hidden_max i nadal nie widać = ukryte głębiej
+            return 0.8 + 0.2 * min(1.0, ((n.hidden_max or QUICK_HIDDEN) + 2) / 12) if n.hidden_checked else 0.9
         return 0.8 + 0.2 * min(1.0, n.hidden_depth / 12)
 
     def _family_key(self, n: Node, plies: int = 4) -> tuple:
@@ -1005,6 +1245,7 @@ class Searcher:
                         continue  # sprawdzamy tylko pozycje po NASZYCH ruchach
                     if not self._verify_node(n, cache):
                         self._cut(n)
+                        self.cut_count += 1
                         self._mark_alive()
                         cut = True
                         break
@@ -1015,7 +1256,7 @@ class Searcher:
 
     def reverify_opponent(self, n: Node) -> None:
         """Czy "błąd" przeciwnika nadal jest błędem na głębokości weryfikacji + głębokość ukrycia."""
-        if n.reverified or not n.move_info:
+        if n.reverified or not n.move_info or self._verify_time_over():
             return
         n.reverified = True
         cands = [d["uci"] for d in n.move_info]
@@ -1037,57 +1278,66 @@ class Searcher:
         if n.moment is not None:
             n.moment["hidden"] = n.hidden
             n.moment["hidden_depth"] = n.hidden_depth
+            n.moment["hidden_max"] = n.hidden_max
+
+    def _find_hidden_depth(self, board: chess.Board, gm: str, bm: str, max_depth: int) -> int | None:
+        return find_hidden_depth(self.eng_shallow, board, gm, bm, max_depth)
+
+    @staticmethod
+    def _hidden_class(n: Node) -> str | None:
+        """"shallow" - silnik widzi błąd do głębokości 6, "deep" - głębiej, None - nie sprawdzano."""
+        if not n.hidden_checked:
+            return None
+        return "shallow" if n.hidden_depth is not None and n.hidden_depth <= SHALLOW_DEPTH else "deep"
 
     def _hidden_depth(self, n: Node) -> None:
-        """Najmniejsza głębokość, na której silnik widzi, że najczęstszy zły ruch jest błędem."""
+        """Pełna głębokość ukrycia (do głębokości weryfikacji) najczęstszego złego ruchu."""
         bad = [d for d in n.move_info if d["loss"] >= MISTAKE]
         good = [d for d in n.move_info if d["loss"] < MISTAKE]
         if not bad or not good:
             return
         bm = max(bad, key=lambda d: d["p"])["uci"]
         gm = min(good, key=lambda d: d["loss"])["uci"]
-        moves = [chess.Move.from_uci(gm), chess.Move.from_uci(bm)]
-        found = None
-        for d in HIDDEN_DEPTHS:
-            if d >= p_depth(self.p):
-                break
-            ls = self.eng.analyse(n.board, depth=d, multipv=2, moves=moves)
-            ev = {l.move: self.my_cp(l) for l in ls}
-            if gm in ev and bm in ev and win_chance(ev[bm]) - win_chance(ev[gm]) >= MISTAKE:
-                found = d
-                break
-        n.hidden_depth = found if found is not None else p_depth(self.p)
-        n.hidden = n.hidden_depth > SHALLOW_DEPTH
+        top = max([d for d in HIDDEN_DEPTHS if d < p_depth(self.p)], default=HIDDEN_DEPTHS[0])
+        n.hidden_depth = self._find_hidden_depth(n.board, gm, bm, top)
+        n.hidden_max = top
+        n.hidden = n.hidden_depth is None or n.hidden_depth > SHALLOW_DEPTH
+        n.hidden_checked = True
+
+    def _verify_novelty(self, n: Node) -> None:
+        self.verify_paths([n])
+        if n.verified is False or not self._alive(n) or n.novelty is None:
+            return
+        parent = n.parent
+        self._status(f"Weryfikacja nowinki: {self._line_text(n)}")
+        best = self.eng.analyse(parent.board, depth=p_depth(self.p), multipv=1)
+        if best and n.my_cp is not None:
+            best_cp = self.my_cp(best[0])
+            loss = max(0, best_cp - n.my_cp)
+            n.novelty.update({"best_cp": best_cp, "best_move": best[0].move, "loss": loss})
+            if loss > self.p.novelty_max_loss:
+                n.verified = False
+                n.novelty["rejected"] = True
 
     def verify_novelties(self, novs: list[Node]) -> int:
         done = 0
         for n in novs:
             if self._verify_time_over():
                 break
-            self.verify_paths([n])
+            self._verify_novelty(n)
             done += 1
-            if n.verified is False:
-                continue
-            parent = n.parent
-            self._status(f"Weryfikacja nowinki: {self._line_text(n)}")
-            best = self.eng.analyse(parent.board, depth=p_depth(self.p), multipv=1)
-            if best and n.my_cp is not None:
-                best_cp = self.my_cp(best[0])
-                loss = max(0, best_cp - n.my_cp)
-                n.novelty.update({"best_cp": best_cp, "best_move": best[0].move, "loss": loss})
-                if loss > self.p.novelty_max_loss:
-                    n.verified = False
-                    n.novelty["rejected"] = True
         return done
 
     def _fill_rarity(self, nodes: list[Node]) -> None:
         seen = set()
         for t in nodes:
             for n in t.path():
-                if n.id in seen or n.local_games is not None or n.lichess_games is not None:
+                known = n.local_games is not None or n.lichess_games is not None
+                if n.id in seen or (known and not n.lichess_skipped):
                     continue
                 seen.add(n.id)
                 _, n.local_games, n.lichess_games, _ = self.policy.counts(n.board)
+                n.lichess_skipped = False
 
     # ------------------------------------------------------------ eksport
     def _node_json(self, n: Node, parent: Node | None = None, u: str | None = None) -> dict:
@@ -1138,6 +1388,8 @@ class Searcher:
                 "reverified": t.reverified, "cost": self.cost(t),
                 "ev": round(t.ev, 4) if t.ev is not None else None, "gain": round(g, 4),
                 "per100": round(t.reach * g * 100, 3),
+                "line_net": self.line_net(t), "hidden_max": t.hidden_max,
+                "confidence": self.confidence(t),
                 "local_games": t.local_games, "lichess_games": t.lichess_games,
                 "opponent": self._opp_info(t, {d["uci"] for d in bad}),
             })
@@ -1204,6 +1456,23 @@ class Searcher:
                 "tree": self._node_json(self.root)}
 
 
+def find_hidden_depth(eng: engine_mod.Engine, board: chess.Board, gm: str, bm: str,
+                      max_depth: int) -> int | None:
+    """Najmniejsza głębokość (do ``max_depth``), na której silnik widzi, że ruch ``bm`` strony
+    na ruchu jest błędem względem ``gm``; None = nie widzi do tej głębokości. Każda analiza
+    z czystą pamięcią silnika i bez głębszych zapisów z pamięci ocen (``exact``)."""
+    mover = board.turn
+    moves = [chess.Move.from_uci(gm), chess.Move.from_uci(bm)]
+    for d in HIDDEN_DEPTHS:
+        if d > max_depth:
+            break
+        ls = eng.analyse(board, depth=d, multipv=2, moves=moves, exact=True)
+        ev = {l.move: l.cp_for(mover) for l in ls}
+        if gm in ev and bm in ev and win_chance(ev[gm]) - win_chance(ev[bm]) >= MISTAKE:
+            return d
+    return None
+
+
 REFUTATION_PLIES = 9  # zły ruch + 4 ruchy kary z każdej strony
 
 
@@ -1258,9 +1527,11 @@ class JobManager:
         self._worker: threading.Thread | None = None
         self.dir = DATA_DIR / "searches"
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._meta: dict[str, tuple] = {}       # plik -> ((mtime, rozmiar), opis)
 
-    def start(self, params: SearchParams) -> Job:
-        validate_history(params)
+    def start(self, params) -> Job:
+        if isinstance(params, SearchParams):
+            validate_history(params)
         job = Job(params)
         job.on_checkpoint = lambda res, j=job: self._save(j, res)
         self.jobs[job.id] = job
@@ -1312,6 +1583,11 @@ class JobManager:
             job.finished = time.time()
             return
         try:
+            if getattr(job.params, "kind", "search") == "calibration":
+                from . import calibrate_db
+                job.result = calibrate_db.run(job)
+                job.status = "cancelled" if job.cancel.is_set() else "done"
+                return
             res = Searcher(job.params, job).run()
             res["partial"] = False
             self._save(job, res)
@@ -1328,19 +1604,30 @@ class JobManager:
         return [j for j in self.jobs.values() if j.status == "queued"]
 
     def saved(self) -> list[dict]:
+        """Lista zapisanych wyszukiwań. Opis każdego pliku jest pamiętany (do zmiany pliku),
+        żeby nie parsować za każdym razem wszystkich wyników (po kilkanaście MB)."""
         out = []
+        running = self._running_ids()
         for f in sorted(self.dir.glob("*.json"), key=lambda f: -f.stat().st_mtime):
             try:
-                d = json.loads(f.read_text(encoding="utf-8"))
+                st = f.stat()
+                sig = (st.st_mtime_ns, st.st_size)
+                hit = self._meta.get(f.name)
+                if hit is None or hit[0] != sig:
+                    d = json.loads(f.read_text(encoding="utf-8"))
+                    pr = d.get("params", {})
+                    meta = {"id": d.get("id", f.stem), "created": d.get("created"), "fen": pr.get("fen"),
+                            "color": pr.get("color"), "traps": len(d.get("traps", [])),
+                            "hard": len(d.get("hard_lines", [])), "novelties": len(d.get("novelties", [])),
+                            "elo": f"{pr.get('elo_min')}-{pr.get('elo_max')}",
+                            "partial_flag": bool(d.get("partial")),
+                            "opponent": (d.get("opponent") or {}).get("name")}
+                    hit = self._meta[f.name] = (sig, meta)
             except (OSError, json.JSONDecodeError):
                 continue
-            pr = d.get("params", {})
-            out.append({"id": d.get("id", f.stem), "created": d.get("created"), "fen": pr.get("fen"),
-                        "color": pr.get("color"), "traps": len(d.get("traps", [])),
-                        "hard": len(d.get("hard_lines", [])), "novelties": len(d.get("novelties", [])),
-                        "elo": f"{pr.get('elo_min')}-{pr.get('elo_max')}",
-                        "partial": bool(d.get("partial")) and d.get("id") not in self._running_ids(),
-                        "opponent": (d.get("opponent") or {}).get("name")})
+            meta = dict(hit[1])
+            meta["partial"] = meta.pop("partial_flag") and meta["id"] not in running
+            out.append(meta)
         return out
 
     def _running_ids(self) -> set:

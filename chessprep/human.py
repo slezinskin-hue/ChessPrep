@@ -200,7 +200,11 @@ class Maia3:
                 cache.mkdir(parents=True, exist_ok=True)
                 cfg = parse_args(["--model", self._name, "--device", "cpu", "--no-use-amp",
                                   "--cache-dir", str(cache)])
-                cfg.checkpoint_path = resolve_checkpoint_path(cfg.model_spec, cache_dir=str(cache))
+                try:  # wagi z dysku - nowe wersje instaluje użytkownik (updates.py)
+                    cfg.checkpoint_path = resolve_checkpoint_path(cfg.model_spec, cache_dir=str(cache),
+                                                                  local_files_only=True)
+                except Exception:  # noqa: BLE001 - jeszcze nie pobrane
+                    cfg.checkpoint_path = resolve_checkpoint_path(cfg.model_spec, cache_dir=str(cache))
                 self._model = load_model(cfg)
                 self._cfg = cfg
                 self._all = get_all_possible_moves()
@@ -220,6 +224,11 @@ class Maia3:
         from maia3.utils import mirror_move
 
         cfg = self._cfg
+        if elo_max > MAIA3_MAX:
+            # zakres sięga ponad dane treningowe (np. 2000-3300): populacja jest silniejsza niż
+            # dół zakresu - przesuwamy dół o tyle, o ile zakres wychodzi ponad model, najwyżej do
+            # 2400 (2000-3300 -> 2400-2600, 1800-2700 -> 1900-2600; przegląd 24.11)
+            elo_min = max(elo_min, min(MAIA3_MAX - 200, elo_min + (elo_max - MAIA3_MAX)))
         elos = _sample_elos(elo_min, elo_max, MAIA3_MIN, MAIA3_MAX)
         hist = deque(maxlen=cfg.history)
         for b in (history or [])[-(cfg.history - 1):]:
@@ -302,3 +311,9 @@ def shared():
         _shared = Maia() if name == "maia2" else Maia3(name)
         _shared_name = name
     return _shared
+
+
+def reset_shared() -> None:
+    """Następne ``shared()`` utworzy model od nowa (np. po pobraniu nowych wag)."""
+    global _shared, _shared_name
+    _shared, _shared_name = None, None

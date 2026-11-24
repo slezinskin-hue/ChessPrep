@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import __version__
+from . import calibration as calib_mod
 from . import config as config_mod
 from . import databases as db_mod
 from . import engine as engine_mod
@@ -161,17 +162,23 @@ def analyse(fen: str, depth: int = 16, multipv: int = 3):
         {**l.as_dict(), "san": _san_pv(b, l.pv), "es_white": round(l.es(chess.WHITE), 3)} for l in lines]}
 
 
-def _history_boards(hist_fen: str, hist_moves: str) -> list[chess.Board]:
-    """Poprzednie pozycje (dla Mai-3) z pozycji startowej i listy ruchów UCI."""
+def _history_boards(hist_fen: str, hist_moves: str, fen: str | None = None) -> list[chess.Board]:
+    """Poprzednie pozycje (dla Mai-3, która widzi 7) z pozycji startowej i listy ruchów UCI.
+    Gdy podano ``fen``, ruchy muszą do niej prowadzić - inaczej bez historii."""
     if not hist_fen:
         return []
     try:
         b = chess.Board(hist_fen)
         out = []
         for u in [m for m in hist_moves.split(",") if m]:
+            mv = chess.Move.from_uci(u)
+            if not b.is_legal(mv):
+                return []
             out.append(b.copy(stack=False))
-            b.push(chess.Move.from_uci(u))
-        return out[-8:]
+            b.push(mv)
+        if fen is not None and b.epd() != chess.Board(fen).epd():
+            return []
+        return out[-7:]
     except (ValueError, AssertionError):
         return []
 
@@ -188,11 +195,13 @@ def stats(fen: str, elo_min: int = 1600, elo_max: int = 2000, lichess: bool = Tr
         out["lichess_error"] = st.lichess.error
     if maia:
         hm = human_mod.shared()
-        probs = hm.probs(b, elo_min, elo_max, _history_boards(hist_fen, hist_moves))
+        hist = _history_boards(hist_fen, hist_moves, fen)
+        probs = hm.probs(b, elo_min, elo_max, hist)
         out["maia"] = [{"uci": u, "san": b.san(chess.Move.from_uci(u)), "p": round(p, 4)}
                        for u, p in list(probs.items())[:12]]
         out["maia_error"] = hm.error
         out["human_model"] = hm.label
+        out["maia_history"] = len(hist)
     book = opponent_mod.shared().get(opponent) if opponent else None
     if book is not None:
         n, moves = book.at(b)
@@ -265,7 +274,8 @@ def search_finish(job_id: str):
 @app.get("/api/searches")
 def searches():
     running = [j.info() | {"fen": j.params.fen, "color": j.params.color}
-               for j in jobs.jobs.values() if j.status in ("queued", "running")]
+               for j in jobs.jobs.values() if j.status in ("queued", "running")
+               and getattr(j.params, "kind", "search") == "search"]
     return {"running": running, "saved": jobs.saved()}
 
 
@@ -273,8 +283,81 @@ def searches():
 def queue():
     """Wyszukiwania czekające w kolejce (w kolejności uruchamiania)."""
     return {"queued": [{"id": j.id, "color": j.params.color, "budget": j.params.budget,
-                        "deadline": j.params.deadline or None, "elo": f"{j.params.elo_min}-{j.params.elo_max}"}
-                       for j in jobs.queued()]}
+                        "deadline": j.params.deadline or None, "elo": f"{j.params.elo_min}-{j.params.elo_max}",
+                        "kind": getattr(j.params, "kind", "search")}
+                       for j in jobs.queued()],
+            "calibration": next((j.info() for j in jobs.jobs.values()
+                                 if getattr(j.params, "kind", "") == "calibration" and j.status == "running"), None)}
+
+
+# ------------------------------------------------------------------ kalibracja na bazie
+
+class CalibReq(BaseModel):
+    elo_min: int = 2000
+    elo_max: int = 2600
+    positions: int = 2000
+    depth: int = 14
+
+
+@app.post("/api/calibrate")
+def calibrate_start(req: CalibReq):
+    from .calibrate_db import CalibParams
+    if not db_mod.active_pgn():
+        raise HTTPException(400, "Najpierw wybierz lokalną bazę partii (PGN) w ustawieniach")
+    params = CalibParams(elo_min=req.elo_min, elo_max=req.elo_max,
+                         budget=max(50, min(20000, req.positions)), depth=max(8, min(20, req.depth)))
+    return jobs.start(params).info()
+
+
+@app.get("/api/calibration")
+def calibration_info(elo_min: int = 2000, elo_max: int = 2600):
+    """Pomiary na bazie i to, który pasuje do bieżącego modelu i rankingu."""
+    model = getattr(human_mod.shared(), "name", "maia2")
+    key, _ = calib_mod.find_measured(calib_mod._load(), model, elo_min, elo_max)
+    all_m = calib_mod.measured_info()
+    job = next((j for j in jobs.jobs.values() if getattr(j.params, "kind", "") == "calibration"
+                and j.status in ("queued", "running")), None)
+    last = next((j for j in reversed(list(jobs.jobs.values()))
+                 if getattr(j.params, "kind", "") == "calibration" and j.status in ("done", "cancelled", "error")),
+                None)
+    return {"model": model, "key": key, "current": all_m.get(key) if key else None, "all": all_m,
+            "min_positions": calib_mod.MIN_MEASURED,
+            "job": job.info() if job else None,
+            "last": (last.info() | {k: (last.result or {}).get(k) for k in ("summary", "saved", "note")})
+            if last else None}
+
+
+# ------------------------------------------------------------------ aktualizacje modeli
+
+class UpdateReq(BaseModel):
+    ids: list[str]
+
+
+@app.get("/api/updates")
+def updates_check(force: bool = False):
+    from . import updates
+    return updates.check(force) | {"state": updates.status()}
+
+
+@app.post("/api/updates")
+def updates_apply(req: UpdateReq):
+    from . import updates
+    if _search_running() and any(i.startswith("weights:") for i in req.ids):
+        raise HTTPException(409, "Trwa wyszukiwanie - zaktualizuj wagi po jego zakończeniu")
+    return updates.apply(req.ids)
+
+
+@app.delete("/api/updates/pending")
+def updates_cancel_pending():
+    from . import updates
+    updates.cancel_pending()
+    return {"ok": True}
+
+
+@app.get("/api/updates/status")
+def updates_status():
+    from . import updates
+    return updates.status()
 
 
 @app.delete("/api/search/{job_id}")
@@ -293,7 +376,7 @@ def _tree_to_pgn(result: dict) -> str:
     if params["fen"] != chess.STARTING_FEN:
         game.setup(board)
     game.headers["Event"] = f"ChessPrep: {params['color']} {params['elo_min']}-{params['elo_max']}"
-    game.headers["Annotator"] = "ChessPrep (Stockfish + Maia-2)"
+    game.headers["Annotator"] = f"ChessPrep (Stockfish + {result.get('human_model') or 'Maia-2'})"
 
     def fmt_cp(cp):
         if cp is None:

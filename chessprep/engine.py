@@ -190,10 +190,14 @@ class Engine:
                 self._engine = None
 
     def analyse(self, board: chess.Board, depth: int = 18, multipv: int = 1,
-                moves: list[chess.Move] | None = None, use_cache: bool = True) -> list[Line]:
+                moves: list[chess.Move] | None = None, use_cache: bool = True,
+                exact: bool = False) -> list[Line]:
         """Najlepsze linie (posortowane od najlepszej dla strony na ruchu).
 
         ``moves`` ogranicza analizę do podanych ruchów (searchmoves).
+        ``exact`` - wynik dokładnie z tej głębokości: bez głębszych zapisów z pamięci ocen
+        i z wyczyszczoną tablicą transpozycji silnika (płytkie "pierwsze wrażenie",
+        głębokość ukrycia). Inaczej płytka analiza widziałaby wyniki wcześniejszych, głębszych.
         """
         if board.is_game_over(claim_draw=False):
             return []
@@ -201,6 +205,8 @@ class Engine:
         multipv = max(1, min(multipv, len(moves) if moves else legal))
         key = fen_key(board)
         root = ",".join(sorted(m.uci() for m in moves)) if moves else ""
+        if exact:
+            root = f"@{depth}|{root}"  # osobny zapis tylko dla tej głębokości
         if use_cache:
             hit = self.cache.get(key, root, multipv, depth)
             if hit is not None:
@@ -208,7 +214,8 @@ class Engine:
         with self._lock:
             eng = self._ensure()
             infos = eng.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv,
-                                root_moves=moves or None)
+                                root_moves=moves or None,
+                                game=object() if exact else None)  # nowa "partia" = ucinewgame
         if isinstance(infos, dict):
             infos = [infos]
         lines = []
@@ -244,6 +251,7 @@ class Engine:
 
 
 _shared: Engine | None = None
+_shallow: Engine | None = None
 
 
 def shared() -> Engine:
@@ -251,6 +259,18 @@ def shared() -> Engine:
     if _shared is None:
         _shared = Engine()
     return _shared
+
+
+def shallow() -> Engine:
+    """Drugi, mały proces silnika do płytkich analiz (1 wątek, 16 MB): czyszczenie jego tablicy
+    transpozycji przed każdą analizą nic nie kosztuje i nie psuje pamięci głównego silnika."""
+    global _shallow
+    main = shared()
+    if _shallow is None or _shallow.path != main.path:
+        if _shallow is not None:
+            _shallow.close()
+        _shallow = Engine(main.path, threads=1, hash_mb=16)
+    return _shallow
 
 
 def set_engine(path: str) -> str:

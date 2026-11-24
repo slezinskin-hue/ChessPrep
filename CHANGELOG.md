@@ -1,5 +1,55 @@
 # Historia zmian
 
+## [0.6.0] – 2026-11-24
+
+Zmiany na podstawie dwóch przeglądów długiego szukania z Maią-3 (`docs/REVIEW-2026-11-24.md`,
+`docs/REVIEW-2026-11-24-b.md`).
+
+### Poprawki
+- **Dojście przy transpozycjach** było zawyżone (średnio ~3×): drogi różniące się kolejnością
+  Twoich ruchów były sumowane, choć zagrasz tylko jedną. Teraz dojście liczone jest dokładnie
+  (Twoje alternatywy – maksimum, ruchy przeciwnika – suma). Zmienia ranking pułapek i „na 100
+  partii”, a szukanie nie wciąga się już w gałęzie z wieloma kolejnościami ruchów.
+- **Głębokość ukrycia i znacznik „ukryta”**: płytkie analizy dostawały z pamięci ocen wyniki
+  głębokich, więc „ukryta” przy niezweryfikowanych pułapkach była zawsze fałszem. Teraz liczy je
+  osobny mały proces silnika z czystą pamięcią.
+- Nagłówek PGN drzewa podaje właściwy model (Maia-3 zamiast zawsze Maia-2).
+
+### Mniej fałszywych pułapek
+- Kalibracja odsetka błędów osobno dla źródła partii (gracze Lichess / Masters / baza lokalna),
+  bez progu 30 partii (waga modelu robi to płynnie), ta sama definicja błędu przy zbieraniu danych
+  i ich stosowaniu, każda pozycja liczy się raz (powtórki tego samego otwarcia nie przeważają).
+  Na koniec szukania wszystkie pozycje są przeliczane jedną krzywą, z danymi z tego szukania.
+  Dane z 0.5.0 są przenoszone.
+- Ostrzejsza krzywa startowa dla silnych graczy (płynnie od rankingu 1800 do 2200, w pełni dla
+  partii klasycznych) – modele przeszacowywały ich błędy kilkukrotnie. Błędy, które silnik widzi od
+  razu, dostają dodatkowo ×0,6, dopóki nie ma pomiaru z „Kalibruj model”.
+- **Kalibruj model** (⚙): pomiar na losowych pozycjach z partii z Twojej bazy, osobno dla błędów
+  widocznych od razu i ukrytych. Działa też dla szukań o podobnym zakresie rankingu; kolejne
+  kalibracje się sumują. Głębokość ukrycia liczona jest w trakcie szukania dla każdej pozycji
+  z błędem (do głębokości 10), więc kalibracja wie, który to rodzaj.
+- Maia-3 przy zakresie powyżej 2600 przesuwa dolny ranking w górę (2000–3300 → 2400–2600,
+  1800–2700 → 1900–2600).
+- Pozycje osiągalne różnymi ruchami przeciwnika dostają w kolejce szukania dokładne dojście.
+
+### Szybciej, czytelniej
+- Bez zapytań do Lichess o pozycje, których poprzedniczki nie mają tam partii (w długim szukaniu
+  ~58% zapytań); dla wyników program i tak dopytuje.
+- Weryfikacja na przemian pułapka – linia – nowinka: gdy skończy się czas, każda grupa ma
+  sprawdzone swoje najlepsze wyniki. W podsumowaniu: ile sprawdzono z ilu, czy przerwano, ile
+  pozycji odcięto, i jak budżet rozłożył się na pierwsze ruchy przeciwnika.
+- Karty pułapek: „widać od razu (gł. N)” dla błędów z samego modelu, które silnik widzi płytko,
+  „ukryta (gł. > N)”, filtr „pewne (z partii albo ukryte)” i **netto** linii: czy pierwsze odejście
+  od najlepszego ruchu opłaca się razem ze wszystkimi pułapkami po nim.
+- Panel „Ruchy ludzi” mówi, czy Maia-3 widzi historię ruchów (bez historii przewidywania są inne).
+- Lista zapisanych wyszukiwań nie wczytuje za każdym razem wszystkich plików.
+
+### Aktualizacje modeli
+- Przy starcie program sprawdza nowe wersje Mai-3 (program i wagi) oraz Mai-2 i pyta, czy
+  zaktualizować. Wagi pobierają się od razu, a paczki instalują przy następnym uruchomieniu
+  programu (wcześniej widać, co się zmieni, np. torch). Wagi Mai-3 nie podmieniają się już same.
+- Weryfikacja pilnuje czasu także w środku wyniku; panel „Ruchy ludzi” sprawdza historię ruchów.
+
 ## [0.5.0] – 2026-11-23
 
 Zmiany na podstawie nocnego szukania na 2500 pozycji (wnioski: `docs/POMYSLY.md`, sekcja 0).

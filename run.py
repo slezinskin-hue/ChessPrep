@@ -30,6 +30,8 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=CONFIG["port"])
     args = ap.parse_args()
 
+    from chessprep import updates
+    updates.run_pending()  # zaplanowana aktualizacja modeli - przed załadowaniem torcha
     from chessprep.server import app
 
     if args.server:
@@ -47,6 +49,8 @@ def main() -> None:
     server.should_exit = True
     from chessprep import engine
     engine.shared().close()
+    if engine._shallow is not None:
+        engine._shallow.close()
 
 
 if __name__ == "__main__":

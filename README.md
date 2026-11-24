@@ -93,6 +93,18 @@ wagi (~20 MB dla modelu 5M) pobiorą się przy pierwszym użyciu do `models/maia
 AGPL-3.0. Maia-2 słabo przewiduje pierwsze ~10 ruchów partii – tam program i tak opiera się głównie na
 statystykach partii.
 
+**Aktualizacje:** przy starcie program sprawdza, czy autorzy wydali nową wersję Mai-3 (program albo
+wagi) lub Mai-2, i pokazuje pasek z przyciskiem **Aktualizuj** – nic nie instaluje się bez Twojej
+zgody. Nowe wagi pobierają się od razu; nowa wersja programu Mai-2/Mai-3 instaluje się przy
+następnym uruchomieniu ChessPrep (pasek pokaże wcześniej, jakie paczki się zmienią; przy zmianie
+torcha pobieranie trwa dłużej). Ręcznie: ⚙ → „Sprawdź aktualizacje modeli”.
+
+**Kalibracja:** modele przeszacowują, jak często silni gracze się mylą (szczególnie w błędach, które
+silnik widzi od razu). ⚙ → **Kalibruj model** losuje pozycje z partii z Twojej bazy (zakres rankingu
+z panelu wyszukiwania), sprawdza, czy gracze naprawdę się pomylili, i z tego liczy poprawkę dla
+pułapek „bez partii”. 2000 pozycji to ok. 30–60 minut; warto ją zrobić raz dla każdego modelu
+i zakresu rankingu (kolejne kalibracje się sumują).
+
 ## Pierwsze uruchomienie
 
 ```powershell

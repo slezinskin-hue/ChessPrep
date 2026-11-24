@@ -12,6 +12,7 @@
   <div id="status" class="status"></div>
   <button id="btn-settings" class="ghost" title="Ustawienia">⚙</button>
 </header>
+<div id="update-banner" class="banner hidden"></div>
 
 <main>
   <!-- LEWA KOLUMNA: szachownica -->
@@ -210,6 +211,23 @@
         </select>
       </label>
       <div id="set-human-info" class="small muted"></div>
+      <div class="row left"><button type="button" id="btn-upd-check" class="ghost small">Sprawdź aktualizacje modeli</button></div>
+      <div id="set-updates" class="small muted"></div>
+    </section>
+
+    <section>
+      <h4>Kalibracja modelu na bazie</h4>
+      <div id="set-calib" class="setbox small">…</div>
+      <div class="row left">
+        <label class="inline">Pozycji <input id="calib-n" type="number" min="200" max="20000" step="100" value="2000" style="width:80px"></label>
+        <button type="button" id="btn-calib">Kalibruj model</button>
+        <button type="button" id="btn-calib-cancel" class="danger hidden">Przerwij</button>
+      </div>
+      <p class="muted small">Model przeszacowuje, jak często silni gracze się mylą. Kalibracja losuje pozycje z partii
+        z lokalnej bazy (zakres rankingu z panelu wyszukiwania, poza teorią), sprawdza, czy gracze naprawdę się pomylili,
+        i z tego liczy poprawkę dla pułapek „bez partii” – osobno dla błędów widocznych od razu i ukrytych.
+        2000 pozycji to ok. 30–60 minut; ustawienie dotyczy bieżącego modelu i przedziału rankingu.
+        Gdy trwa wyszukiwanie, kalibracja czeka w kolejce.</p>
     </section>
 
     <section>
